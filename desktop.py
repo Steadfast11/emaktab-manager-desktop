@@ -132,14 +132,18 @@ def configure_browser(data, install=True):
 
 def open_window(url, data):
     executable = find_chrome()
+    existing_chrome = bool(executable)
     if not executable:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
             executable = pw.chromium.executable_path
         if not Path(executable).is_file():
             raise RuntimeError('Chrome topilmadi. Google Chrome o‘rnating yoki to‘liq desktop paketdan foydalaning.')
-    command = [executable, '--app=' + url, '--new-window', '--no-first-run',
-               '--no-default-browser-check', '--user-data-dir=' + str(data / 'ui-profile')]
+    command = [executable, '--app=' + url, '--new-window', '--no-first-run', '--no-default-browser-check']
+    # Reuse Chrome's UI process so activation brings the requested window forward.
+    # Actual eMaktab authentication still uses separate bundled Playwright contexts.
+    if not existing_chrome:
+        command += ['--user-data-dir=' + str(data / 'ui-profile')]
     subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if sys.platform == 'darwin' and 'Google Chrome.app' in executable:
         def activate():
