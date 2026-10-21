@@ -1,0 +1,12 @@
+eMaktab Manager — proprietary application
+
+All rights reserved by the software's rights holder. Permission to use a supplied
+copy does not grant permission to redistribute its source code or modified copies.
+Third-party components retain their own licenses; see THIRD-PARTY-NOTICES.txt and
+the bundled browser's notices. Rights provided by applicable law remain unaffected.
+
+This independent tool is not an official eMaktab product. Use only accounts you
+are authorized to manage and observe the service's terms. No CAPTCHA, 2FA or
+service rate-limit bypass is provided. Login does not prove an official activity
+counter was updated. No promise of error-free operation or absolute resistance to
+reverse engineering is made. Back up your private data directory and vault key.

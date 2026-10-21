@@ -1,0 +1,539 @@
+import asyncio
+import json
+import os
+import secrets
+from typing import Literal
+import sqlite3
+from resilience import CircuitBreaker, CooldownScheduler, RateLimitDetector, Outcome, SessionStore, session_evaluation
+from simulation import LocalSimulationServer, make_app
+from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
+
+from cryptography.fernet import Fernet
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
+from playwright.async_api import async_playwright, TimeoutError as BrowserTimeout, Error as BrowserError
+
+APP_PORT = int(os.environ.get('EMAKTAB_PORT', '8765'))
+BASE = Path(__file__).resolve().parent
+DATA = Path(os.environ.get('EMAKTAB_DATA_DIR', BASE / 'data'))
+DATA.mkdir(parents=True, exist_ok=True, mode=0o700)
+os.chmod(DATA, 0o700)
+KEY = DATA / 'vault.key'
+if not KEY.exists():
+    fd = os.open(KEY, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'wb') as f:
+        f.write(Fernet.generate_key())
+if KEY.is_symlink():
+    raise RuntimeError('Vault key must not be a symlink')
+os.chmod(KEY, 0o600)
+VAULT = Fernet(KEY.read_bytes())
+DB = DATA / 'manager.sqlite3'
+TZ = ZoneInfo('Asia/Samarkand')
+LOGIN_URL = 'https://login.emaktab.uz/'
+LOGOUT = 'a[href*="/logout"], a[href*="/logoff"], form[action*="/logout"], [data-test-id="logout-button"]'
+CHALLENGE = 'input[name="Captcha.Input"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"], input[autocomplete="one-time-code"], input[name="otp"], input[name="code"], input[name="verificationCode"]'
+
+
+def now():
+    return datetime.now(TZ).isoformat(timespec='seconds')
+
+
+def connect():
+    c = sqlite3.connect(DB)
+    c.row_factory = sqlite3.Row
+    return c
+
+
+with connect() as c:
+    c.executescript('''CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY, label TEXT NOT NULL, secret BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'idle', detail TEXT NOT NULL DEFAULT '', updated TEXT);
+    CREATE TABLE IF NOT EXISTS logs(id INTEGER PRIMARY KEY, account_id TEXT, time TEXT, message TEXT);
+    CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER DEFAULT 0, time TEXT DEFAULT '07:00', last_date TEXT DEFAULT '');
+    INSERT OR IGNORE INTO settings(id) VALUES(1);''')
+    c.execute('CREATE TABLE IF NOT EXISTS account_groups(id TEXT PRIMARY KEY, name TEXT NOT NULL)')
+    c.execute("INSERT OR IGNORE INTO account_groups(id,name) VALUES('default','Asosiy')")
+    if 'group_id' not in [r[1] for r in c.execute('PRAGMA table_info(accounts)')]:
+        c.execute("ALTER TABLE accounts ADD COLUMN group_id TEXT NOT NULL DEFAULT 'default'")
+    if 'mode' not in [r[1] for r in c.execute('PRAGMA table_info(settings)')]:
+        c.execute("ALTER TABLE settings ADD COLUMN mode TEXT NOT NULL DEFAULT 'web'")
+    c.execute("UPDATE settings SET mode='web' WHERE mode!='web'")
+    c.execute("UPDATE accounts SET status='interrupted',detail='Oldingi ish server qayta ishga tushganda uzildi' WHERE status IN ('queued','running','waiting')")
+os.chmod(DB, 0o600)
+
+
+def public_accounts():
+    with connect() as c:
+        rows = list(c.execute('SELECT id,label,secret,status,detail,updated,group_id FROM accounts ORDER BY rowid'))
+        result = []
+        for row in rows:
+            account = dict(row)
+            account['login'] = json.loads(VAULT.decrypt(account.pop('secret')))['login']
+            result.append(account)
+        return result
+
+
+def update(aid, status, detail):
+    with connect() as c:
+        c.execute('UPDATE accounts SET status=?,detail=?,updated=? WHERE id=?', (status, detail, now(), aid))
+        c.execute('INSERT INTO logs(account_id,time,message) VALUES(?,?,?)', (aid, now(), detail))
+        c.execute('DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 300)')
+
+
+async def visible(page, selector):
+    loc = page.locator(selector)
+    for i in range(await loc.count()):
+        if await loc.nth(i).is_visible():
+            return True
+    return False
+
+
+async def authenticated(page):
+    # Cookies or a redirect alone do not prove authentication. Fail closed.
+    host = urlparse(page.url).hostname or ''
+    return (host == 'emaktab.uz' or host.endswith('.emaktab.uz')) and not await visible(page, 'input[name="password"]') and await visible(page, LOGOUT)
+
+
+with connect() as c:
+    first_breaker_install = not c.execute("SELECT name FROM sqlite_master WHERE name='breaker'").fetchone()
+    has_accounts = c.execute('SELECT count(*) FROM accounts').fetchone()[0] > 0
+breaker = CircuitBreaker(DB)
+sessions = SessionStore(DB, VAULT)
+# Existing live installation has a user-reported unresolved limit; do not resume it on deployment.
+if first_breaker_install and has_accounts:
+    breaker.pause_rate()
+lab_breaker = CircuitBreaker(DATA / 'lab.sqlite3', cooldown=CooldownScheduler(base=3, maximum=60, jitter=0))
+lab = LocalSimulationServer(lab_breaker)
+os.chmod(DATA / 'lab.sqlite3', 0o600)
+
+
+class StopCycle(Exception):
+    pass
+
+
+def halt_cycle(aid, detection):
+    if detection.outcome == Outcome.RATE_LIMIT:
+        breaker.pause_rate(detection)
+        update(aid, 'rate_limited', 'Kirish limiti: butun sikl to‘xtatildi')
+        reason = 'Limit tufayli bu akkauntga urinish qilinmadi'
+    else:
+        # An unknown result stops this batch; only a real rate-limit keeps Run locked.
+        if breaker.status()['state'] == 'HALF_OPEN':
+            breaker.pause_review()
+        update(aid, 'unverified', 'Natija noma’lum: qayta urinishdan oldin qo‘lda tekshirish kerak')
+        reason = 'Noma’lum natija tufayli bu akkauntga urinish qilinmadi'
+    for a in public_accounts():
+        if a['status'] == 'queued':
+            update(a['id'], 'skipped', reason)
+    raise StopCycle()
+
+
+async def page_detection(page, rate_response=None):
+    if rate_response and rate_response[0]:
+        return rate_response[0]
+    text = await page.locator('body').inner_text(timeout=3000)
+    return RateLimitDetector.classify_ui([text], authenticated=await authenticated(page), login_form=await visible(page, 'input[name="password"]'))
+
+
+class Runner:
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.task = None
+        self.browser = None
+        self.pw = None
+        self.contexts = []
+        self.current = None
+
+    async def close(self):
+        browser, pw = self.browser, self.pw
+        self.browser = self.pw = None
+        self.contexts = []
+        for resource, method in ((browser, 'close'), (pw, 'stop')):
+            if resource:
+                try:
+                    await asyncio.wait_for(getattr(resource, method)(), timeout=5)
+                except Exception:
+                    pass
+
+    def browser_disconnected(self, browser):
+        if self.browser is browser and self.task and not self.task.done():
+            self.task.cancel()
+
+    async def run(self, headed=False, account_id=None):
+        async with self.lock:
+            try:
+                for a in public_accounts():
+                    if account_id and a['id'] != account_id:
+                        continue
+                    update(a['id'], 'queued', 'Navbatda: brauzer sessiyasi tekshiriladi')
+                await self.close()
+                self.pw = await async_playwright().start()
+                self.browser = await self.pw.chromium.launch(headless=not headed, channel='chromium')
+                active_browser = self.browser
+                active_browser.on('disconnected', lambda: self.browser_disconnected(active_browser))
+                with connect() as c:
+                    rows = list(c.execute('SELECT * FROM accounts WHERE id=? ORDER BY rowid', (account_id,))) if account_id else list(c.execute('SELECT * FROM accounts ORDER BY rowid'))
+                for row in rows:
+                    breaker.assert_allowed()
+                    aid = row['id']
+                    self.current = aid
+                    update(aid, 'running', 'Alohida sessiya tekshirilmoqda')
+                    context = None
+                    submitted = False
+                    try:
+                        saved = None if breaker.status()['state'] == 'HALF_OPEN' else sessions.load(aid)
+                        kwargs = {'storage_state': saved} if saved else {}
+                        context = await self.browser.new_context(locale='uz-UZ', timezone_id='Asia/Samarkand', **kwargs)
+                        self.contexts.append(context)
+                        page = await context.new_page()
+                        page.set_default_timeout(15000)
+                        rate = [None]
+                        def response_seen(response):
+                            host = urlparse(response.url).hostname or ''
+                            if response.status == 429 and (host == 'emaktab.uz' or host.endswith('.emaktab.uz')):
+                                rate[0] = RateLimitDetector.classify_http(429, response.headers)
+                        page.on('response', response_seen)
+                        await page.goto(LOGIN_URL, wait_until='domcontentloaded', timeout=30000)
+                        initial = await page_detection(page, rate)
+                        if initial.outcome == Outcome.RATE_LIMIT:
+                            halt_cycle(aid, initial)
+                        if initial.outcome != Outcome.SUCCESS:
+                            sessions.delete(aid)
+                            if await visible(page, CHALLENGE):
+                                ok = await self.wait_manual(page, aid, headed, rate)
+                            else:
+                                credential = json.loads(VAULT.decrypt(row['secret']))
+                                await page.locator('input[name="login"]').fill(credential['login'])
+                                await page.locator('input[name="password"]').fill(credential['password'])
+                                matches = (await page.locator('input[name="login"]').input_value() == credential['login'] and await page.locator('input[name="password"]').input_value() == credential['password'])
+                                del credential
+                                if not matches:
+                                    halt_cycle(aid, RateLimitDetector.classify_ui([]))
+                                submitted = True
+                                await page.locator('[data-test-id="login-button"]').click()
+                                ok = False
+                                for _ in range(30):
+                                    detection = await page_detection(page, rate)
+                                    if detection.outcome == Outcome.RATE_LIMIT:
+                                        halt_cycle(aid, detection)
+                                    if detection.outcome == Outcome.SUCCESS:
+                                        ok = True
+                                        break
+                                    if detection.outcome == Outcome.BAD_CREDENTIALS:
+                                        update(aid, 'failed', 'Login/parol rad etildi; akkaunt o‘tkazildi')
+                                        breaker.rejected()
+                                        if breaker.status()['state'] in ('PAUSED_RATE_LIMIT','PAUSED_REVIEW'):
+                                            raise StopCycle()
+                                        break
+                                    if await visible(page, CHALLENGE):
+                                        ok = await self.wait_manual(page, aid, headed, rate)
+                                        break
+                                    await asyncio.sleep(1)
+                        else:
+                            ok = True
+                        if ok:
+                            sessions.save(aid, await context.storage_state())
+                            breaker.success()
+                            update(aid, 'success', 'Kirish tasdiqlandi; brauzer sessiyasi shifrlab saqlandi')
+                        elif next(a['status'] for a in public_accounts() if a['id'] == aid) != 'failed':
+                            halt_cycle(aid, RateLimitDetector.classify_ui([]))
+                    except StopCycle:
+                        raise
+                    except asyncio.CancelledError:
+                        update(aid, 'cancelled', 'Foydalanuvchi ishni to‘xtatdi')
+                        raise
+                    except Exception:
+                        if submitted:
+                            halt_cycle(aid, RateLimitDetector.classify_ui([]))
+                        update(aid, 'failed', 'Mahalliy brauzer/tarmoq xatosi; login qayta yuborilmadi')
+                        breaker.rejected()
+                        if breaker.status()['state'] in ('PAUSED_RATE_LIMIT','PAUSED_REVIEW'):
+                            raise StopCycle()
+                    finally:
+                        if context:
+                            try:
+                                await context.close()
+                            except Exception:
+                                pass
+                            if context in self.contexts:
+                                self.contexts.remove(context)
+                    self.current = None
+                    await asyncio.sleep(2)
+            except StopCycle:
+                pass
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                for a in public_accounts():
+                    if a['status'] in ('queued', 'running'):
+                        update(a['id'], 'failed', 'Brauzer ishga tushmadi yoki sikl to‘xtatilgan')
+            finally:
+                for a in public_accounts():
+                    if a['status'] == 'queued':
+                        update(a['id'], 'skipped', 'Sikl to‘xtadi; akkaunt tekshirilmadi')
+                self.current = None
+                breaker.rejected()
+                await self.close()
+
+    async def wait_manual(self, page, aid, headed, rate=None):
+        if not headed:
+            update(aid, 'waiting', 'CAPTCHA/2FA yoki qo‘lda kirish kerak. Brauzer oynasi rejimida qayta ishga tushiring')
+            return False
+        update(aid, 'waiting', 'Brauzer oynasida CAPTCHA/2FA yoki kirishni bajaring. 120 soniya kutiladi')
+        for _ in range(120):
+            check = await page_detection(page, rate)
+            if check.outcome == Outcome.RATE_LIMIT:
+                halt_cycle(aid, check)
+            if await authenticated(page):
+                update(aid, 'success', 'Qo‘lda kirishdan so‘ng akkaunt holati tasdiqlandi')
+                return True
+            await asyncio.sleep(1)
+        update(aid, 'unverified', 'Qo‘lda tasdiqlash vaqti tugadi. Keyingi akkaunt davom etadi')
+        return False
+
+    def start(self, headed, mode='web', account_id=None):
+        try:
+            breaker.assert_allowed()
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        if self.task and not self.task.done():
+            raise HTTPException(409, 'Ish allaqachon davom etmoqda')
+        if mode != 'web':
+            raise HTTPException(422, 'Faqat sayt rejimi mavjud')
+        self.task = asyncio.create_task(self.run(headed, account_id))
+
+
+runner = Runner()
+
+
+async def scheduler():
+    while True:
+        with connect() as c:
+            s = dict(c.execute('SELECT * FROM settings WHERE id=1').fetchone())
+        dt = datetime.now(TZ)
+        licensed = getattr(app.state, 'license_check', lambda: True)()
+        if licensed and s['enabled'] and dt.strftime('%H:%M') == s['time'] and s['last_date'] != dt.date().isoformat() and public_accounts():
+            if (not runner.task or runner.task.done()) and breaker.status()['state'] == 'IDLE':
+                with connect() as c:
+                    c.execute('UPDATE settings SET last_date=? WHERE id=1', (dt.date().isoformat(),))
+                runner.start(False, 'web')
+        await asyncio.sleep(15)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    timer = asyncio.create_task(scheduler())
+    yield
+    timer.cancel()
+    if runner.task and not runner.task.done():
+        runner.task.cancel()
+        try:
+            await runner.task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+    await runner.close()
+    runner.task = None
+
+
+app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.middleware('http')
+async def local_only(request: Request, call_next):
+    if request.headers.get('host') not in (f'localhost:{APP_PORT}', f'127.0.0.1:{APP_PORT}', 'testserver'):
+        return JSONResponse({'detail': 'Faqat mahalliy kirish'}, status_code=403)
+    if request.method not in ('GET', 'HEAD'):
+        origin = request.headers.get('origin')
+        if origin not in (f'http://localhost:{APP_PORT}', f'http://127.0.0.1:{APP_PORT}') or request.headers.get('x-manager') != '1':
+            return JSONResponse({'detail': 'Mahalliy interfeys orqali foydalaning'}, status_code=403)
+    response = await call_next(request)
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    return response
+
+
+class Group(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+
+
+class Account(BaseModel):
+    group_id: str = "default"
+    label: str = Field(min_length=1, max_length=60)
+    login: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=1, max_length=500)
+
+
+class Run(BaseModel):
+    account_id: str | None = None
+    headed: bool = False
+    mode: Literal['web'] = 'web'
+
+
+class Schedule(BaseModel):
+    enabled: bool = False
+    mode: Literal['web'] = 'web'
+    time: str = Field(pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
+
+
+@app.exception_handler(RequestValidationError)
+async def private_validation(request, exc):
+    return JSONResponse({'detail': 'Maydonlarni tekshiring; barcha qiymatlar to‘liq bo‘lishi kerak'}, status_code=422)
+
+
+def editable():
+    if runner.task and not runner.task.done():
+        raise HTTPException(409, 'Avval davom etayotgan ishni to‘xtating')
+
+
+@app.get('/')
+async def home():
+    return FileResponse(BASE / 'static/index.html')
+
+
+@app.get('/assets/{name}')
+async def asset(name: str):
+    if name not in ('app.js', 'style.css', 'activation.js', 'activation.css'):
+        raise HTTPException(404)
+    return FileResponse(BASE / 'static' / name)
+
+
+@app.get('/api/state')
+async def state():
+    with connect() as c:
+        logs = [dict(r) for r in c.execute('SELECT * FROM logs ORDER BY id DESC LIMIT 60')]
+        schedule = dict(c.execute('SELECT enabled,time,mode FROM settings WHERE id=1').fetchone())
+        groups = [dict(row) for row in c.execute('SELECT id,name FROM account_groups ORDER BY rowid')]
+    return {'groups': groups, 'accounts': public_accounts(), 'logs': logs, 'running': bool(runner.task and not runner.task.done()), 'schedule': schedule, 'breaker': breaker.status(), 'session_policy': session_evaluation(), 'desktop': bool(getattr(app.state, 'desktop', False))}
+
+
+@app.post('/api/groups')
+async def add_group(group: Group):
+    editable()
+    name = group.name.strip()
+    if not name:
+        raise HTTPException(400, 'Bo‘lim nomini kiriting')
+    gid = secrets.token_hex(8)
+    with connect() as c:
+        c.execute('INSERT INTO account_groups(id,name) VALUES(?,?)', (gid, name))
+    return {'id': gid}
+
+
+@app.put('/api/groups/{gid}')
+async def rename_group(gid: str, group: Group):
+    editable()
+    name = group.name.strip()
+    if not name:
+        raise HTTPException(400, 'Bo‘lim nomini kiriting')
+    with connect() as c:
+        if not c.execute('UPDATE account_groups SET name=? WHERE id=?', (name, gid)).rowcount:
+            raise HTTPException(404, 'Bo‘lim topilmadi')
+    return {'ok': True}
+
+
+@app.post('/api/accounts')
+async def add(a: Account):
+    editable()
+    with connect() as c:
+        if not c.execute('SELECT 1 FROM account_groups WHERE id=?', (a.group_id,)).fetchone():
+            raise HTTPException(404, 'Bo‘lim topilmadi')
+        aid = secrets.token_hex(8)
+        c.execute('INSERT INTO accounts(id,label,secret,group_id) VALUES(?,?,?,?)', (aid, a.label, VAULT.encrypt(json.dumps({'login': a.login, 'password': a.password}).encode()), a.group_id))
+    return {'id': aid}
+
+
+@app.post('/api/accounts/{aid}/editor')
+async def account_editor(aid: str):
+    editable()
+    with connect() as c:
+        row = c.execute('SELECT label,secret FROM accounts WHERE id=?', (aid,)).fetchone()
+    if row is None:
+        raise HTTPException(404, 'Akkaunt topilmadi')
+    credential = json.loads(VAULT.decrypt(row['secret']))
+    return {'label': row['label'], 'login': credential['login'], 'password': credential['password']}
+
+
+@app.put('/api/accounts/{aid}')
+async def edit(aid: str, a: Account):
+    editable()
+    sessions.delete(aid)
+    with connect() as c:
+        if not c.execute('SELECT 1 FROM account_groups WHERE id=?', (a.group_id,)).fetchone():
+            raise HTTPException(404, 'Bo‘lim topilmadi')
+        result = c.execute("UPDATE accounts SET label=?,secret=?,group_id=?,status='idle',detail='',updated=NULL WHERE id=?", (a.label, VAULT.encrypt(json.dumps({'login': a.login, 'password': a.password}).encode()), a.group_id, aid))
+        if not result.rowcount:
+            raise HTTPException(404)
+    return {'ok': True}
+
+
+@app.delete('/api/accounts/{aid}')
+async def delete(aid: str):
+    editable()
+    sessions.delete(aid)
+    with connect() as c:
+        c.execute('DELETE FROM accounts WHERE id=?', (aid,))
+        c.execute('DELETE FROM logs WHERE account_id=?', (aid,))
+    return {'ok': True}
+
+
+@app.post('/api/run')
+async def run(options: Run):
+    state = breaker.status()
+    if state['state'] == 'PAUSED_REVIEW' and state['blocked_at'] == 0:
+        breaker.resume()
+    try:
+        breaker.assert_allowed()
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    if not public_accounts():
+        raise HTTPException(400, 'Avval akkaunt qo‘shing')
+    if options.account_id and not any(a['id'] == options.account_id for a in public_accounts()):
+        raise HTTPException(404, 'Akkaunt topilmadi')
+    runner.start(options.headed, options.mode, options.account_id)
+    return {'ok': True}
+
+
+@app.post('/api/stop')
+async def stop():
+    if runner.task and not runner.task.done():
+        runner.task.cancel()
+        try:
+            await runner.task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+    await runner.close()
+    runner.task = None
+    return {'ok': True}
+
+
+@app.put('/api/schedule')
+async def schedule(s: Schedule):
+    with connect() as c:
+        c.execute('UPDATE settings SET enabled=?,time=?,mode=? WHERE id=1', (s.enabled, s.time, s.mode))
+    return {'ok': True}
+
+
+@app.post('/api/resilience/resume')
+async def resume_cycle():
+    editable()
+    try:
+        breaker.resume()
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return breaker.status()
+
+
+@app.get('/api/session-policy')
+async def policy():
+    return session_evaluation()
+
+
+app.mount('/simulation', make_app(lab))
