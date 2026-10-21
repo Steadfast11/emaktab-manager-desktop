@@ -137,7 +137,10 @@ def main():
         if file.name in forbidden or file.suffix in ('.pyc', '.pyo'):
             raise RuntimeError('Private data or source unexpectedly present in release: ' + file.name)
     # Gate publishing on the actual native executable, not the Python source.
-    subprocess.run([str(executable), '--self-test'], check=True, timeout=180)
+    acceptance = subprocess.run([str(executable), '--self-test'], capture_output=True, text=True, timeout=180)
+    print(acceptance.stdout, flush=True)
+    print(acceptance.stderr, flush=True)
+    acceptance.check_returncode()
     subprocess.run([sys.executable, '-m', 'pytest', str(ROOT / 'tests/test_desktop.py'), '-q'],
                    env=dict(os.environ, EMAKTAB_TEST_EXECUTABLE=str(executable)), check=True, timeout=180)
     label = {'darwin':'macOS','win32':'Windows'}.get(sys.platform, 'Linux') + '-' + platform.machine()

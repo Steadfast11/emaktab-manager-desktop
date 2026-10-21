@@ -333,6 +333,8 @@ def main():
     except Exception as error:
         # Never send arbitrary exception content (which may contain private paths/values) to the UI.
         if args.self_test:
+            import traceback
+            traceback.print_exc()
             print(json.dumps({'ok': False, 'error_type': type(error).__name__}), flush=True)
         else:
             show_error('Ilova ishga tushmadi. Diskda joy va ma’lumotlar papkasiga yozish huquqini tekshiring. Akkauntlar o‘chirilmagan.')
