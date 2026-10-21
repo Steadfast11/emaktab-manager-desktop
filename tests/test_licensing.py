@@ -57,6 +57,8 @@ def test_no_feature_access_before_activation_and_valid_key_unlocks(tmp_path):
     with TestClient(app) as client:
         assert client.get('/api/state').status_code==403
         assert client.post('/api/run').status_code==403
+        assert client.post('/api/%72un').status_code==403
+        assert client.post('/api/run/').status_code==403
         assert client.get('/').status_code==200
         assert client.get('/api/license/status').json()['active'] is False
         assert client.post('/api/license/activate',json={'key':issue(private,'device-B')}).status_code==400

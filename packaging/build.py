@@ -126,7 +126,7 @@ def main():
     else:
         executable = native / ('eMaktab-Manager.exe' if os.name == 'nt' else 'eMaktab-Manager')
         artifact = executable
-    forbidden = {'vault.key', 'manager.sqlite3', 'lab.sqlite3', *SOURCES}
+    forbidden = {'vault.key', 'license.key', 'issuer-private.pem', 'manager.sqlite3', 'lab.sqlite3', *SOURCES}
     for file in (artifact.rglob('*') if artifact.is_dir() else []):
         if file.name in forbidden or file.suffix in ('.pyc', '.pyo'):
             raise RuntimeError('Private data or source unexpectedly present in release: ' + file.name)

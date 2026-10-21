@@ -100,7 +100,7 @@ def install_license_gate(app, gate, *, self_test=False):
 
     @app.middleware('http')
     async def licensed(request: Request, call_next):
-        path = request.url.path
+        path = request.scope['path'].rstrip('/') or '/'
         allowed = path.startswith('/api/license/') or path.startswith('/api/desktop/') or path.startswith('/assets/')
         if self_test:
             # Self-test uses a disposable database; it can never authenticate a real account.

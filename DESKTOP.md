@@ -2,6 +2,10 @@
 
 ## Foydalanuvchi uchun
 
+Desktop paket birinchi ochilganda qurilma kodini ko‘rsatadi. Dastur egasidan shu
+qurilmaga litsenziya olib kiriting; keyingi ochilishlarda qayta so‘ralmaydi.
+Kalit boshqa kompyuterda ishlamaydi. Ega uchun: [LICENSING.md](LICENSING.md).
+
 Har bir tizim uchun alohida paket kerak. Windows paketi Mac’da ishlamaydi.
 macOS uchun Apple Silicon va Intel ham alohida yig‘iladi.
 
