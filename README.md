@@ -1,5 +1,10 @@
 # eMaktab Manager — faqat sayt
 
+Foydalanuvchiga yuboriladigan kompilyatsiya qilingan desktop paketlar:
+[DESKTOP.md](DESKTOP.md). Qurilmaga bog‘langan litsenziya va faqat egasi uchun
+kalit yaratish: [LICENSING.md](LICENSING.md). Quyidagi buyruqlar manbali
+dasturchi muhiti uchun; mijozga loyiha, `.venv` yoki `data/` yuborilmaydi.
+
 FastAPI + Playwright asosidagi mahalliy web-boshqaruv. Android ilova, emulator, ADB, Accessibility va APK funksiyalari faol loyihadan olib tashlangan. Oldingi ishlanmalar faqat `work/retired-android-20261019` arxivida.
 
 ## Ishga tushirish

@@ -1,0 +1,19 @@
+# ~/.config/systemd/user/emaktab-manager.service
+# /ABSOLUTE/PATH qiymatini haqiqiy papka yo‘li bilan almashtiring.
+[Unit]
+Description=eMaktab Manager local service
+After=network.target
+
+[Service]
+WorkingDirectory=/ABSOLUTE/PATH/emaktab-manager
+Environment=EMAKTAB_PORT=8766
+ExecStart=/ABSOLUTE/PATH/emaktab-manager/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8766 --no-access-log
+UMask=0077
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+# systemctl --user daemon-reload
+# systemctl --user enable --now emaktab-manager
+# 24/7 logoutdan keyin ishlashi uchun administrator orqali loginctl enable-linger USER

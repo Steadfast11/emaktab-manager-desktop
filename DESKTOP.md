@@ -9,6 +9,12 @@ Kalit boshqa kompyuterda ishlamaydi. Ega uchun: [LICENSING.md](LICENSING.md).
 Har bir tizim uchun alohida paket kerak. Windows paketi Mac’da ishlamaydi.
 macOS uchun Apple Silicon va Intel ham alohida yig‘iladi.
 
+Brauzer dvigatelining [rasmiy tizim talablari](https://playwright.dev/python/docs/intro#system-requirements):
+Windows 11 yoki Windows Server 2019+, macOS 14+, Ubuntu 22.04/24.04/26.04 yoki
+Debian 12/13. Ushbu chiqarishda Windows va Linux faqat x64; Mac ARM64 va Intel.
+Haqiqiy native sinov muhiti: Windows Server 2022, Ubuntu 22.04 va macOS 15;
+Mac ARM64 paketi ushbu ishlab chiqish kompyuterida ham tekshiriladi.
+
 - macOS: ZIP’ni oching, ichidagi `.app`ni Applications papkasiga ko‘chiring va oching.
 - Windows: `.exe`ni foydalanuvchi papkasida saqlang va ikki marta bosing. Administrator huquqi kerak emas.
 - Linux: `.bin`ga fayl xususiyatlaridan bajarish huquqini bering va oching. Desktop muhit kerak; terminalsiz oynani ochib bo‘lmaydi. Ubuntu 22.04/24.04 uchun yig‘iladi.
