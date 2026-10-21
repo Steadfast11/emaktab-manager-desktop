@@ -100,11 +100,17 @@ def main():
         command += ['--macos-app-name=eMaktab Manager', '--macos-signed-app-name=local.emaktab.manager',
                     '--macos-app-version=1.0.0', '--macos-app-icon=' + str(stage / 'icon.icns')]
     elif sys.platform == 'win32':
-        command += ['--windows-console-mode=attach', '--windows-icon-from-ico=' + str(stage / 'icon.ico'),
+        # MSVC C1002 on Playwright's very large generated API module: use ClangCL.
+        command += ['--clang', '--jobs=2', '--lto=no',
+                    '--windows-console-mode=attach', '--windows-icon-from-ico=' + str(stage / 'icon.ico'),
                     '--company-name=eMaktab Manager', '--product-name=eMaktab Manager', '--file-version=1.0.0']
     command += [str(stage / 'desktop.py')]
-    compiled = subprocess.run(command, cwd=stage, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    print(compiled.stdout, flush=True)
+    lines = []
+    with subprocess.Popen(command, cwd=stage, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1) as compiler:
+        for line in compiler.stdout:
+            lines.append(line)
+            print(line, end='', flush=True)
+        compiled = subprocess.CompletedProcess(command, compiler.wait(), ''.join(lines))
     if compiled.returncode:
         # Finder/iCloud metadata can invalidate otherwise complete ad-hoc signing.
         # Repair only this specific signing failure, never hide compilation errors.

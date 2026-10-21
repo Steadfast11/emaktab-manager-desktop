@@ -1,6 +1,11 @@
 name: Native desktop release candidates
 on:
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'JSON array of runner labels to build'
+        type: string
+        default: '["windows-2022", "ubuntu-22.04", "macos-15", "macos-15-intel"]'
 permissions:
   contents: read
 jobs:
@@ -8,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, ubuntu-22.04, macos-15, macos-15-intel]
+        os: ${{ fromJSON(inputs.platforms) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
