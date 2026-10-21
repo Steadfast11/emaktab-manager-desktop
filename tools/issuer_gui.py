@@ -24,10 +24,10 @@ def encode(raw):return base64.urlsafe_b64encode(raw).decode().rstrip('=')
 
 root=tk.Tk();root.title('eMaktab Manager — faqat egasi uchun');root.geometry('620x520')
 root.configure(bg='#f4f5ef')
-tk.Label(root,text='Litsenziya yaratish',font=('Helvetica',22,'bold'),bg='#f4f5ef').pack(pady=(24,8))
-tk.Label(root,text='Mijoz yuborgan qurilma kodini kiriting.\nMaxfiy imzo kaliti bu kompyuterdan chiqmaydi.',bg='#f4f5ef').pack(pady=8)
-device=tk.Text(root,height=4,font=('Courier',12),wrap='word');device.pack(fill='x',padx=24,pady=12)
-result=tk.Text(root,height=9,font=('Courier',11),wrap='word')
+tk.Label(root,text='Litsenziya yaratish',font=('Helvetica',22,'bold'),bg='#f4f5ef',fg='#102c25').pack(pady=(24,8))
+tk.Label(root,text='Mijoz yuborgan qurilma kodini kiriting.\nMaxfiy imzo kaliti bu kompyuterdan chiqmaydi.',bg='#f4f5ef',fg='#102c25').pack(pady=8)
+device=tk.Text(root,height=4,font=('Courier',12),wrap='word',bg='white',fg='#102c25',insertbackground='#102c25');device.pack(fill='x',padx=24,pady=12)
+result=tk.Text(root,height=9,font=('Courier',11),wrap='word',bg='white',fg='#102c25')
 def create():
     code=device.get('1.0','end').strip().upper()
     if not re.fullmatch(r'EM1-(?:[A-F0-9]{8}-){7}[A-F0-9]{8}',code):
