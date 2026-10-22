@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from desktop import InstanceLock, bind_socket, read_instance, user_data_dir
 import desktop
+from resilience import ClosingConnection
 
 
 def test_platform_data_paths_do_not_follow_download_folder(tmp_path):
@@ -99,7 +100,7 @@ def test_repeat_launch_shutdown_crash_recovery_and_credentials_survive(tmp_path)
         # Existing encrypted data must survive crashes even while activation blocks its API.
         from cryptography.fernet import Fernet
         token = Fernet((tmp_path / 'vault.key').read_bytes()).encrypt(json.dumps({'login':'offline-test','password':'synthetic-only'}).encode())
-        with sqlite3.connect(tmp_path / 'manager.sqlite3') as database:
+        with sqlite3.connect(tmp_path / 'manager.sqlite3', factory=ClosingConnection) as database:
             database.execute('INSERT INTO accounts(id,label,secret) VALUES(?,?,?)', ('synthetic','Synthetic',token))
         key = (tmp_path / 'vault.key').read_bytes()
         second = subprocess.run(command, env=env, timeout=8)
@@ -115,7 +116,7 @@ def test_repeat_launch_shutdown_crash_recovery_and_credentials_survive(tmp_path)
         recovered = wait_ready(tmp_path / 'desktop.json', process)
         base = f"http://127.0.0.1:{recovered['port']}"
         assert local_request(base, '/api/license/status')['active'] is False
-        with sqlite3.connect(tmp_path / 'manager.sqlite3') as database:
+        with sqlite3.connect(tmp_path / 'manager.sqlite3', factory=ClosingConnection) as database:
             assert database.execute('SELECT secret FROM accounts WHERE id=?',('synthetic',)).fetchone()[0] == token
         assert (tmp_path / 'vault.key').read_bytes() == key
         local_request(base, '/api/desktop/quit', {}, {'Origin':base,'X-Manager':'1','Content-Type':'application/json'})
