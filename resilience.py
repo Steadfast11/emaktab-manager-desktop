@@ -9,6 +9,14 @@ from email.utils import parsedate_to_datetime
 from enum import Enum
 
 
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, *args):
+        try:
+            return super().__exit__(*args)
+        finally:
+            self.close()
+
+
 class Outcome(str, Enum):
     SUCCESS = 'SUCCESS'
     BAD_CREDENTIALS = 'BAD_CREDENTIALS'
@@ -83,7 +91,7 @@ class CircuitBreaker:
             c.execute("UPDATE breaker SET state='PAUSED_RATE_LIMIT' WHERE state='HALF_OPEN'")
 
     def db(self):
-        c = sqlite3.connect(self.path, timeout=10)
+        c = sqlite3.connect(self.path, timeout=10, factory=ClosingConnection)
         c.row_factory = sqlite3.Row
         return c
 
@@ -139,11 +147,11 @@ class CircuitBreaker:
 class SessionStore:
     def __init__(self, path, vault):
         self.path, self.vault = str(path), vault
-        with sqlite3.connect(self.path) as c:
+        with sqlite3.connect(self.path, factory=ClosingConnection) as c:
             c.execute('CREATE TABLE IF NOT EXISTS browser_sessions(account_id TEXT PRIMARY KEY, token BLOB NOT NULL)')
 
     def load(self, aid):
-        with sqlite3.connect(self.path) as c:
+        with sqlite3.connect(self.path, factory=ClosingConnection) as c:
             r = c.execute('SELECT token FROM browser_sessions WHERE account_id=?', (aid,)).fetchone()
         if not r:
             return None
@@ -154,11 +162,11 @@ class SessionStore:
             return None
 
     def save(self, aid, state):
-        with sqlite3.connect(self.path) as c:
+        with sqlite3.connect(self.path, factory=ClosingConnection) as c:
             c.execute('INSERT OR REPLACE INTO browser_sessions VALUES(?,?)', (aid, self.vault.encrypt(json.dumps(state).encode())))
 
     def delete(self, aid):
-        with sqlite3.connect(self.path) as c:
+        with sqlite3.connect(self.path, factory=ClosingConnection) as c:
             c.execute('DELETE FROM browser_sessions WHERE account_id=?', (aid,))
 
 

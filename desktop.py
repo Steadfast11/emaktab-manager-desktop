@@ -208,7 +208,8 @@ def smoke_test(base, data):
     aid = request('/api/accounts', {'group_id': group, 'label': 'Synthetic test', 'login': 'offline-synthetic', 'password': password})['id']
     state = request('/api/state')
     assert len(state['accounts']) == 1 and password not in json.dumps(state)
-    with sqlite3.connect(data / 'manager.sqlite3') as c:
+    from resilience import ClosingConnection
+    with sqlite3.connect(data / 'manager.sqlite3', factory=ClosingConnection) as c:
         secret = c.execute('SELECT secret FROM accounts WHERE id=?', (aid,)).fetchone()[0]
     assert password.encode() not in secret
     assert json.loads(Fernet((data / 'vault.key').read_bytes()).decrypt(secret))['password'] == password

@@ -4,7 +4,7 @@ import os
 import secrets
 from typing import Literal
 import sqlite3
-from resilience import CircuitBreaker, CooldownScheduler, RateLimitDetector, Outcome, SessionStore, session_evaluation
+from resilience import ClosingConnection, CircuitBreaker, CooldownScheduler, RateLimitDetector, Outcome, SessionStore, session_evaluation
 from simulation import LocalSimulationServer, make_app
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -45,7 +45,7 @@ def now():
 
 
 def connect():
-    c = sqlite3.connect(DB)
+    c = sqlite3.connect(DB, factory=ClosingConnection)
     c.row_factory = sqlite3.Row
     return c
 
