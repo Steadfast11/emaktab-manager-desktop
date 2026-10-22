@@ -16,8 +16,6 @@ jobs:
         os: ${{ fromJSON(inputs.platforms) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
-    env:
-      NUITKA_CACHE_DIR: ${{ runner.temp }}/emaktab-nuitka-cache
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,7 +27,7 @@ jobs:
         id: compiler-cache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.NUITKA_CACHE_DIR }}
+          path: ${{ runner.temp }}/emaktab-nuitka-cache
           key: native-${{ runner.os }}-${{ runner.arch }}-py312-${{ hashFiles('requirements-release-lock.txt') }}-${{ github.sha }}
           restore-keys: |
             native-${{ runner.os }}-${{ runner.arch }}-py312-${{ hashFiles('requirements-release-lock.txt') }}-
@@ -47,6 +45,8 @@ jobs:
       - name: Test launcher, isolation and existing behavior
         run: python -m pytest tests -q
       - name: Build and test actual native executable
+        env:
+          NUITKA_CACHE_DIR: ${{ runner.temp }}/emaktab-nuitka-cache
         run: python packaging/build.py
       - name: Publish only tested artifacts to this workflow
         uses: actions/upload-artifact@v4
@@ -64,5 +64,5 @@ jobs:
         if: ${{ !cancelled() && steps.compiler-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
-          path: ${{ env.NUITKA_CACHE_DIR }}
+          path: ${{ runner.temp }}/emaktab-nuitka-cache
           key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
