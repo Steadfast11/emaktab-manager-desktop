@@ -29,4 +29,22 @@ jobs:
           New-Item -ItemType Directory -Force $env:LOCALAPPDATA | Out-Null
           $env:EMAKTAB_ONDEMAND_ROOT=(Resolve-Path website).Path
           $env:EMAKTAB_ONDEMAND_TEST='1'
-          & ./packaging/website-start.ps1
+          New-Item -ItemType Directory -Force outputs/Windows-1.0.1,work/ondemand | Out-Null
+          Copy-Item website/manager.exe outputs/Windows-1.0.1/eMaktab-Manager-1.0.1-Windows-x64.exe
+          Copy-Item website/sqlite3.exe work/ondemand/sqlite3.exe
+          Copy-Item packaging/website-start.ps1 work/ondemand/start.ps1
+          python tools/build_website_single.py
+          $bundle=(Resolve-Path outputs/eMaktab-Website-Windows.cmd).Path
+          & cmd.exe /d /c $bundle
+          if($LASTEXITCODE -ne 0){throw 'Single-file launcher cold start failed'}
+          $data=Join-Path $env:LOCALAPPDATA 'eMaktabManager'
+          $vault=Join-Path $data 'vault.key'
+          $before=(Get-FileHash $vault -Algorithm SHA256).Hash
+          $db=Join-Path $data 'manager.sqlite3'
+          & website/sqlite3.exe $db 'UPDATE settings SET enabled=1 WHERE id=1;'
+          & cmd.exe /d /c $bundle
+          if($LASTEXITCODE -ne 0){throw 'Single-file launcher warm start failed'}
+          if((Get-FileHash $vault -Algorithm SHA256).Hash -ne $before){throw 'Vault key changed'}
+          $enabled=& website/sqlite3.exe $db 'SELECT enabled FROM settings WHERE id=1;'
+          if($enabled.Trim() -ne '0'){throw 'Saved schedule was not disabled'}
+          Write-Output 'SINGLE_FILE_COLD_WARM_SCHEDULE_DISABLED_DATA_PRESERVED_OK' 
