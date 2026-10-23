@@ -43,6 +43,13 @@ try {
     $process=Get-Process -Id $owned.pid
     $static=Join-Path (Split-Path -Parent $process.Path) 'static'
     $css=Join-Path $static 'style.css'
+    if(!(Test-Path -LiteralPath $css)){
+        $candidates=@()
+        foreach($id in @($backend.Id,$owned.pid)){
+            $candidates+=@(Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter ('onefile_'+$id+'_*') -ErrorAction SilentlyContinue)
+        }
+        foreach($dir in $candidates){$candidate=Join-Path $dir.FullName 'static\style.css';if(Test-Path -LiteralPath $candidate){$css=$candidate;break}}
+    }
     if(!(Test-Path -LiteralPath $css)){throw 'The local website stylesheet was not found.'}
     Add-Content -LiteralPath $css -Value "`n.lower>article:first-child{display:none!important}.lower{grid-template-columns:1fr!important}" -Encoding UTF8
     $chrome=Get-ChildItem -LiteralPath (Join-Path $data 'browser-cache') -Filter chrome.exe -Recurse|Select-Object -First 1
