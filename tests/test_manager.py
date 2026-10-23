@@ -189,3 +189,18 @@ def test_web_only_defaults_and_removed_android_api(tmp_path):
             assert client.post('/api/run',json={'account_id':aid,'headed':True},headers=HEADERS).status_code==200
             start.assert_called_once_with(True,'web',aid)
         assert client.get('/api/state').json()['schedule']['mode']=='web'
+
+
+def test_browser_start_failure_reports_safe_code_without_secret():
+    clear()
+    with TestClient(m.app) as client:
+        client.post('/api/accounts', json={'label':'Startup fixture','login':'fixture','password':'fixture'}, headers=HEADERS)
+    async def check():
+        r = m.Runner()
+        with patch.object(r, 'start_browser', AsyncMock(side_effect=NotImplementedError('never disclose fixture-secret'))):
+            await r.run(True)
+        account = m.public_accounts()[0]
+        assert account['status'] == 'failed'
+        assert 'NotImplementedError/' in account['detail']
+        assert 'fixture-secret' not in account['detail']
+    asyncio.run(check())

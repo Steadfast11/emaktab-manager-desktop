@@ -1,5 +1,6 @@
 """Native entry point. Never imports the application before choosing its data directory."""
 import argparse
+import asyncio
 import contextlib
 import hmac
 import hashlib
@@ -18,7 +19,7 @@ import time
 import urllib.request
 import zipfile
 
-VERSION = '1.0.0'
+VERSION = '1.0.1'
 PRODUCT = 'eMaktab Manager'
 LOCAL_HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -176,7 +177,7 @@ def write_instance(path, info):
     os.replace(temp, path)
 
 
-def install_desktop_routes(app, server, token, instance):
+def install_desktop_routes(app, server, token, instance, *, self_test=False):
     from fastapi import HTTPException, Request
 
     @app.get('/api/desktop/health')
@@ -190,6 +191,28 @@ def install_desktop_routes(app, server, token, instance):
         # Application middleware requires the exact local Origin and X-Manager.
         server.should_exit = True
         return {'ok': True}
+
+
+
+    if self_test:
+        @app.post('/api/desktop/browser-check')
+        async def browser_check(request: Request):
+            if not hmac.compare_digest(request.headers.get('x-desktop-token', ''), token):
+                raise HTTPException(403, 'Private offline acceptance endpoint')
+            from app import Runner
+            tested = []
+            for headed in ((False, True) if sys.platform == 'win32' else (False,)):
+                probe = Runner()
+                try:
+                    browser = await probe.start_browser(headed)
+                    page = await browser.new_page()
+                    await page.route('**/*', lambda route: route.abort())
+                    await page.set_content('<title>Offline browser check</title><h1>Ready</h1>')
+                    assert await page.title() == 'Offline browser check'
+                    tested.append('headed' if headed else 'headless')
+                finally:
+                    await probe.close()
+            return {'ok': True, 'server_loop': type(asyncio.get_running_loop()).__name__, 'modes': tested}
 
 
 def smoke_test(base, data):
@@ -265,9 +288,9 @@ def serve(data, *, no_browser=False, self_test=False):
         import uvicorn
         manager.app.state.desktop = True
         server = uvicorn.Server(uvicorn.Config(manager.app, host='127.0.0.1', port=port, access_log=False,
-                                                log_config=None, ws='none', loop='asyncio', http='h11'))
+                                                log_config=None, workers=1, ws='none', loop='asyncio', http='h11'))
         token, instance = secrets.token_urlsafe(32), secrets.token_hex(16)
-        install_desktop_routes(manager.app, server, token, instance)
+        install_desktop_routes(manager.app, server, token, instance, self_test=self_test)
         install_license_gate(manager.app, LicenseGate(data, PUBLIC_KEY), self_test=self_test)
         result = {'code': 0}
         def ready():
@@ -283,6 +306,9 @@ def serve(data, *, no_browser=False, self_test=False):
                 write_instance(runtime, info)
                 base = f'http://127.0.0.1:{port}'
                 if self_test:
+                    request = urllib.request.Request(base + '/api/desktop/browser-check', data=b'{}', headers={'Origin':base,'X-Manager':'1','Content-Type':'application/json','X-Desktop-Token':token})
+                    with LOCAL_HTTP.open(request, timeout=90) as response:
+                        print(json.dumps({'async_server_browser':json.load(response)}), flush=True)
                     print(json.dumps(smoke_test(base, data)), flush=True)
                 elif not no_browser:
                     open_window(base + '/', data)
@@ -297,7 +323,11 @@ def serve(data, *, no_browser=False, self_test=False):
                 if self_test or result['code']:
                     server.should_exit = True
         threading.Thread(target=ready, daemon=True).start()
-        server.run(sockets=[sock])
+        if sys.platform == 'win32':
+            with asyncio.Runner(loop_factory=asyncio.ProactorEventLoop) as event_runner:
+                event_runner.run(server.serve(sockets=[sock]))
+        else:
+            server.run(sockets=[sock])
         return result['code'] if server.started else 1
     finally:
         with contextlib.suppress(OSError):

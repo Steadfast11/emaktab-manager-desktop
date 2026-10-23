@@ -98,12 +98,12 @@ def main():
         command += ['--include-data-files=' + str(stage / name) + '=' + name for name in ('browser-payload.zip','browser-payload.json')]
     if sys.platform == 'darwin':
         command += ['--macos-app-name=eMaktab Manager', '--macos-signed-app-name=local.emaktab.manager',
-                    '--macos-app-version=1.0.0', '--macos-app-icon=' + str(stage / 'icon.icns')]
+                    '--macos-app-version=1.0.1', '--macos-app-icon=' + str(stage / 'icon.icns')]
     elif sys.platform == 'win32':
         # MSVC C1002 on Playwright's very large generated API module: use ClangCL.
         command += ['--clang', '--jobs=2', '--lto=no',
                     '--windows-console-mode=attach', '--windows-icon-from-ico=' + str(stage / 'icon.ico'),
-                    '--company-name=eMaktab Manager', '--product-name=eMaktab Manager', '--file-version=1.0.0']
+                    '--company-name=eMaktab Manager', '--product-name=eMaktab Manager', '--file-version=1.0.1']
     command += [str(stage / 'desktop.py')]
     lines = []
     with subprocess.Popen(command, cwd=stage, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1) as compiler:
@@ -153,7 +153,7 @@ def main():
     with package.open('rb') as f:
         digest = hashlib.file_digest(f, 'sha256').hexdigest()
     (out / (package.name + '.sha256')).write_text(digest + '  ' + package.name + '\n')
-    (out / 'build-result.json').write_text(json.dumps({'artifact': package.name, 'native_executable': str(executable), 'platform':sys.platform,'architecture':platform.machine(),'offline_acceptance':'passed','version':'1.0.0','sha256':digest},indent=2))
+    (out / 'build-result.json').write_text(json.dumps({'artifact': package.name, 'native_executable': str(executable), 'platform':sys.platform,'architecture':platform.machine(),'offline_acceptance':'passed','version':'1.0.1','sha256':digest},indent=2))
     print('Verified release:', package)
 
 

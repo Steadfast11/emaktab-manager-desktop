@@ -163,6 +163,12 @@ class Runner:
         if self.browser is browser and self.task and not self.task.done():
             self.task.cancel()
 
+    async def start_browser(self, headed=False):
+        await self.close()
+        self.pw = await async_playwright().start()
+        self.browser = await self.pw.chromium.launch(headless=not headed, channel='chromium')
+        return self.browser
+
     async def run(self, headed=False, account_id=None):
         async with self.lock:
             try:
@@ -170,9 +176,7 @@ class Runner:
                     if account_id and a['id'] != account_id:
                         continue
                     update(a['id'], 'queued', 'Navbatda: brauzer sessiyasi tekshiriladi')
-                await self.close()
-                self.pw = await async_playwright().start()
-                self.browser = await self.pw.chromium.launch(headless=not headed, channel='chromium')
+                await self.start_browser(headed)
                 active_browser = self.browser
                 active_browser.on('disconnected', lambda: self.browser_disconnected(active_browser))
                 with connect() as c:
@@ -267,10 +271,13 @@ class Runner:
                 pass
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
+                kind = type(error).__name__
+                loop = type(asyncio.get_running_loop()).__name__
+                message = f'Brauzer ochilmadi [{kind}/{loop}]. Shu kodni dastur egasiga yuboring.'
                 for a in public_accounts():
                     if a['status'] in ('queued', 'running'):
-                        update(a['id'], 'failed', 'Brauzer ishga tushmadi yoki sikl to‘xtatilgan')
+                        update(a['id'], 'failed', message)
             finally:
                 for a in public_accounts():
                     if a['status'] == 'queued':
