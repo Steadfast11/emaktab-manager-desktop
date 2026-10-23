@@ -1,0 +1,32 @@
+name: Website on-demand lifecycle check
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  website:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: eMaktab-Manager-windows-2022
+          run-id: 39988778615
+          github-token: ${{ github.token }}
+          path: candidate
+      - name: Test actual website window closure and server shutdown
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force website | Out-Null
+          Copy-Item candidate/eMaktab-Manager-Windows-AMD64.exe website/manager.exe
+          Invoke-WebRequest 'https://www.sqlite.org/2026/sqlite-tools-win-x64-3540100.zip' -OutFile sqlite.zip
+          if((Get-FileHash sqlite.zip -Algorithm SHA256).Hash.ToLower() -ne 'fb20997ade5583a5fbf1e36db7bc3c82c9416b3f314f16961e1572aa4e49487d'){throw 'SQLite checksum mismatch'}
+          Expand-Archive sqlite.zip sqlite-tools
+          Get-ChildItem sqlite-tools -Recurse -Filter sqlite3.exe | Select-Object -First 1 | Copy-Item -Destination website/sqlite3.exe
+          $env:LOCALAPPDATA=Join-Path $env:RUNNER_TEMP 'website-isolated-user'
+          New-Item -ItemType Directory -Force $env:LOCALAPPDATA | Out-Null
+          $env:EMAKTAB_ONDEMAND_ROOT=(Resolve-Path website).Path
+          $env:EMAKTAB_ONDEMAND_TEST='1'
+          & ./packaging/website-start.ps1
