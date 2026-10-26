@@ -1,0 +1,80 @@
+name: Single EXE website release
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: eMaktab-Manager-windows-2022
+          run-id: 39988778615
+          github-token: ${{ github.token }}
+          path: backend
+      - name: Prepare verified tools
+        shell: pwsh
+        run: |
+          Invoke-WebRequest 'https://www.sqlite.org/2026/sqlite-tools-win-x64-3540100.zip' -OutFile sqlite.zip
+          if((Get-FileHash sqlite.zip -Algorithm SHA256).Hash.ToLower() -ne 'fb20997ade5583a5fbf1e36db7bc3c82c9416b3f314f16961e1572aa4e49487d'){throw 'SQLite checksum mismatch'}
+          Expand-Archive sqlite.zip sqlite-tools
+          $sqlite=(Get-ChildItem sqlite-tools -Recurse -Filter sqlite3.exe|Select-Object -First 1).FullName
+          python packaging/native-website/build.py --backend backend/eMaktab-Manager-Windows-AMD64.exe --sqlite $sqlite --out website-native
+      - name: Verify exact GUI EXE lifecycle and data preservation
+        shell: pwsh
+        run: |
+          $candidate=(Resolve-Path website-native/eMaktab.exe).Path
+          $testRoot=Join-Path $env:RUNNER_TEMP 'eMaktab teacher test'
+          New-Item -ItemType Directory -Force $testRoot|Out-Null
+          $report=Join-Path $testRoot 'result.json'
+          $listener=[System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback,8766)
+          $listener.Start()
+          function Check-Run {
+            Remove-Item $report -ErrorAction SilentlyContinue
+            $process=Start-Process -FilePath $candidate -ArgumentList @('--test-lifecycle',('"'+$report+'"')) -PassThru
+            if(!$process.WaitForExit(150000)){Stop-Process -Id $process.Id;throw 'GUI EXE test timed out'}
+            if($process.ExitCode -ne 0){if(Test-Path $report){Get-Content $report};throw 'GUI EXE failed'}
+            $r=Get-Content -Raw $report|ConvertFrom-Json
+            if(!$r.ok -or !$r.browserOpened -or !$r.browserClosed -or !$r.serverStopped){throw 'Missing lifecycle proof'}
+            foreach($id in @($r.backendPid,$r.serverPid,$r.browserPid)){if(Get-Process -Id $id -ErrorAction SilentlyContinue){throw 'Owned process remained alive'}}
+            return $r
+          }
+          try {
+            $cold=Check-Run
+            $vault=Join-Path $cold.dataDirectory 'vault.key'
+            $vaultHash=(Get-FileHash $vault -Algorithm SHA256).Hash
+            $database=Join-Path $cold.dataDirectory 'manager.sqlite3'
+            $sqlite=(Get-ChildItem sqlite-tools -Recurse -Filter sqlite3.exe|Select-Object -First 1).FullName
+            & $sqlite $database "UPDATE settings SET enabled=1 WHERE id=1; INSERT INTO account_groups(id,name) VALUES('preserve-fixture','Class fixture');"
+            $license=Join-Path $cold.dataDirectory 'license.key'
+            Set-Content $license 'invalid-but-must-be-preserved'
+            $licenseHash=(Get-FileHash $license -Algorithm SHA256).Hash
+            $warm=Check-Run
+            if((Get-FileHash $vault -Algorithm SHA256).Hash -ne $vaultHash){throw 'Encryption key changed'}
+            if((Get-FileHash $license -Algorithm SHA256).Hash -ne $licenseHash){throw 'License file changed'}
+            $enabled=& $sqlite $database 'SELECT enabled FROM settings WHERE id=1;'
+            $group=& $sqlite $database "SELECT name FROM account_groups WHERE id='preserve-fixture';"
+            if($enabled.Trim() -ne '0' -or $group.Trim() -ne 'Class fixture'){throw 'Schedule or groups were not preserved correctly'}
+            # Corrupt only cached program code; the next launch must repair it itself.
+            [System.IO.File]::WriteAllText((Join-Path $warm.cacheDirectory 'manager.exe'),'broken runtime cache')
+            $repaired=Check-Run
+            if((Get-FileHash $vault -Algorithm SHA256).Hash -ne $vaultHash){throw 'Repair changed encryption key'}
+            $info=@{cold=$cold;warm=$warm;repaired=$repaired;keyPreserved=$true;licenseFilePreserved=$true;groupPreserved=$true;savedScheduleDisabled=$true;occupiedPortPreserved=$listener.Server.IsBound;noConsole=$true}
+            $info|ConvertTo-Json -Depth 6|Set-Content website-native/acceptance.json
+            Write-Output 'GUI_EXE_COLD_WARM_REPAIR_WINDOW_CLOSE_DATA_PRESERVED_OK'
+          } finally {$listener.Stop()}
+          python -c "import struct; from pathlib import Path; p=Path('website-native/eMaktab.exe').read_bytes(); pe=struct.unpack_from('<I',p,60)[0]; assert p[pe:pe+4]==b'PE\0\0'; assert struct.unpack_from('<H',p,pe+24+68)[0]==2; print('WINDOWS_GUI_SUBSYSTEM_NO_CONSOLE_OK')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eMaktab-single-exe
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            website-native/eMaktab.exe
+            website-native/eMaktab.exe.sha256
+            website-native/build-result.json
+            website-native/acceptance.json
