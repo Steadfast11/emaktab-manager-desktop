@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography;
@@ -110,8 +111,9 @@ namespace EMaktabWebsite {
         static void Add(ZipArchive zip,string name,byte[] bytes) { var entry=zip.CreateEntry(name,CompressionLevel.Optimal); using(var output=entry.Open()) output.Write(bytes,0,bytes.Length); }
 
         string SyncPath { get { return Path.Combine(data,"portable.sync"); } }
-        string ReadSync() { try { return File.Exists(SyncPath) ? File.ReadAllText(SyncPath).Trim() : ""; } catch { return ""; } }
-        void WriteSync(string digest) { try { File.WriteAllText(SyncPath,digest); } catch { } }
+        // portable.sync: line 1 = digest of the accounts at the last sync with an exe, line 2 = UTC time of that sync.
+        string[] ReadSync() { try { return File.Exists(SyncPath) ? File.ReadAllText(SyncPath).Trim().Split(new [] {'\n'},StringSplitOptions.RemoveEmptyEntries) : new string[0]; } catch { return new string[0]; } }
+        void WriteSync(string digest) { try { File.WriteAllText(SyncPath,digest+"\n"+DateTime.UtcNow.ToString("o")); } catch { } }
 
         // --- trailer inside the exe ---
         static Trailer Parse(FileStream file) {
@@ -194,9 +196,11 @@ namespace EMaktabWebsite {
                 return;
             }
             status("Akkauntlar birlashtirilmoqda...");
-            bool liveUnchanged=ReadSync()==live.Digest;
+            // The exe's version only wins a conflict if local data is untouched since the last sync AND the exe was saved after that sync.
+            bool preferIncoming=false; string[] sync=ReadSync(); DateTime syncTime, savedAt;
+            if(sync.Length>=2 && sync[0].Trim()==live.Digest && DateTime.TryParse(sync[1].Trim(),CultureInfo.InvariantCulture,DateTimeStyles.RoundtripKind,out syncTime) && DateTime.TryParse(trailer.Meta.SavedAt,CultureInfo.InvariantCulture,DateTimeStyles.RoundtripKind,out savedAt) && savedAt>syncTime) preferIncoming=true;
             BackupLive("merge");
-            Merge(trailer.Blob,liveUnchanged);
+            Merge(trailer.Blob,preferIncoming);
         }
 
         string Login(byte[] plain,out string password) {

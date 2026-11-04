@@ -122,7 +122,7 @@ def main(argv):
         attach(argv[2], argv[3])
     elif command == 'sync':        # sync <folder>   (marks live data as unchanged since last sync)
         value, _ = digest(Path(argv[2]) / 'manager.sqlite3')
-        (Path(argv[2]) / 'portable.sync').write_text(value)
+        (Path(argv[2]) / 'portable.sync').write_text(value + '\n2025-06-01T00:00:00.0000000Z')
     elif command == 'has-trailer':  # has-trailer <exe>
         try:
             read_trailer(argv[2])
