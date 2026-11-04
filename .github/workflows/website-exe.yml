@@ -3,19 +3,19 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-  actions: read
 jobs:
   release:
     runs-on: windows-2022
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: eMaktab-Manager-windows-2022
-          run-id: 39988778615
-          github-token: ${{ github.token }}
-          path: backend
+      - name: Download compiled backend 1.0.1
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download backend-1.0.1 --repo ${{ github.repository }} --pattern 'eMaktab-Manager-Windows-AMD64.exe' --dir backend
+          if((Get-FileHash backend/eMaktab-Manager-Windows-AMD64.exe -Algorithm SHA256).Hash.ToLower() -ne '149fcf5b16631e9dbfae0e18b7e615bf1c9269a090d36a07a431fc08d1fda914'){throw 'Backend checksum mismatch'}
       - name: Prepare verified tools
         shell: pwsh
         run: |
@@ -68,6 +68,12 @@ jobs:
             Write-Output 'GUI_EXE_COLD_WARM_REPAIR_WINDOW_CLOSE_DATA_PRESERVED_OK'
           } finally {$listener.Stop()}
           python -c "import struct; from pathlib import Path; p=Path('website-native/eMaktab.exe').read_bytes(); pe=struct.unpack_from('<I',p,60)[0]; assert p[pe:pe+4]==b'PE\0\0'; assert struct.unpack_from('<H',p,pe+24+68)[0]==2; print('WINDOWS_GUI_SUBSYSTEM_NO_CONSOLE_OK')"
+      - name: Verify accounts travel inside the EXE (restore, embed, wipe, merge)
+        shell: pwsh
+        run: |
+          python -m pip install --quiet cryptography
+          $work=Join-Path $env:RUNNER_TEMP 'portable-acceptance'
+          ./tests/portable_acceptance.ps1 -Candidate (Resolve-Path website-native/eMaktab.exe).Path -Work $work
       - uses: actions/upload-artifact@v4
         with:
           name: eMaktab-single-exe

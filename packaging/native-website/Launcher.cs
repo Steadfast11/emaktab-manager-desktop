@@ -16,8 +16,8 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("eMaktab")]
 [assembly: AssemblyProduct("eMaktab")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 namespace EMaktabWebsite {
     sealed class UserError : Exception {
@@ -57,8 +57,8 @@ namespace EMaktabWebsite {
         readonly Label detail=new Label(); readonly ProgressBar progress=new ProgressBar();
         readonly CancellationTokenSource stop=new CancellationTokenSource();
         readonly Runner runner; bool finished;
-        public LaunchForm(string report) {
-            runner=new Runner(report, stop.Token, UpdateStatus, BrowserReady);
+        public LaunchForm(string report,bool portable) {
+            runner=new Runner(report, stop.Token, UpdateStatus, BrowserReady, portable);
             Text="eMaktab"; ClientSize=new Size(490,190); FormBorderStyle=FormBorderStyle.FixedDialog;
             MaximizeBox=false; StartPosition=FormStartPosition.CenterScreen; BackColor=Color.FromArgb(244,245,239);
             try { Icon=Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
@@ -96,7 +96,7 @@ namespace EMaktabWebsite {
             using(var dialog=new Form {Text="eMaktab",ClientSize=new Size(490,210),FormBorderStyle=FormBorderStyle.FixedDialog,StartPosition=FormStartPosition.CenterScreen,MaximizeBox=false,MinimizeBox=false}) {
                 var text=new Label {Text=message+"\n\nYordam kodi: "+code,Location=new Point(24,22),Size=new Size(440,125),Font=new Font("Segoe UI",11)};
                 var copy=new Button {Text="Kodni nusxalash",Location=new Point(175,158),Size=new Size(140,32)};
-                copy.Click+=delegate { try { Clipboard.SetText("eMaktab 1.1.0 | "+code); copy.Text="Nusxalandi"; } catch {} };
+                copy.Click+=delegate { try { Clipboard.SetText("eMaktab 1.2.0 | "+code); copy.Text="Nusxalandi"; } catch {} };
                 var close=new Button {Text="Yopish",Location=new Point(328,158),Size=new Size(132,32),DialogResult=DialogResult.OK};
                 dialog.Controls.Add(text);dialog.Controls.Add(copy);dialog.Controls.Add(close);dialog.AcceptButton=close;dialog.CancelButton=close;dialog.ShowDialog(owner);
             }
@@ -106,9 +106,10 @@ namespace EMaktabWebsite {
         readonly string report,data,cache,runtime; readonly CancellationToken stop;
         readonly Action<string> status; readonly Action ready;
         Process browser,backend; ServerInfo owned; ProcessGroup group;
+        readonly bool portable; Portable store; bool prepareFailed;
         static readonly JavaScriptSerializer Json=new JavaScriptSerializer();
-        public Runner(string testReport,CancellationToken cancellation,Action<string> update,Action opened) {
-            report=testReport;stop=cancellation;status=update;ready=opened;
+        public Runner(string testReport,CancellationToken cancellation,Action<string> update,Action opened,bool keepAccountsInExe) {
+            report=testReport;stop=cancellation;status=update;ready=opened;portable=keepAccountsInExe;
             string local=Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             string testing=report==null ? null : Path.GetDirectoryName(Path.GetFullPath(report));
             data=testing==null ? Path.Combine(local,"eMaktabManager") : Path.Combine(testing,"data");
@@ -119,12 +120,12 @@ namespace EMaktabWebsite {
         void CheckCancel() { if(stop.IsCancellationRequested) throw new UserError("CANCELLED","Dastur yopildi."); }
         void Install() {
             status("Kerakli fayllar tayyorlanmoqda...");CheckCancel();Directory.CreateDirectory(cache);
-            string manager=Path.Combine(cache,"manager.exe"), sqlite=Path.Combine(cache,"sqlite3.exe");
-            if(File.Exists(manager) && File.Exists(sqlite) && Hash(manager)==Payload.ManagerHash && Hash(sqlite)==Payload.SqliteHash) return;
+            string manager=Path.Combine(cache,"manager.exe"), sqlite=Path.Combine(cache,"sqlite3.exe"), saver=Path.Combine(cache,"saver.exe");
+            if(File.Exists(manager) && File.Exists(sqlite) && File.Exists(saver) && Hash(manager)==Payload.ManagerHash && Hash(sqlite)==Payload.SqliteHash && Hash(saver)==Payload.SaverHash) return;
             using(var source=Assembly.GetExecutingAssembly().GetManifestResourceStream("Payload")) {
                 if(source==null) throw new UserError("FILE_INCOMPLETE","Fayl to'liq yuklanmagan. Uni qayta yuklab oling.");
                 using(var zip=new ZipArchive(source,ZipArchiveMode.Read)) {
-                    foreach(var pair in new [] {new [] {"manager.exe",Payload.ManagerHash},new [] {"sqlite3.exe",Payload.SqliteHash}}) {
+                    foreach(var pair in new [] {new [] {"manager.exe",Payload.ManagerHash},new [] {"sqlite3.exe",Payload.SqliteHash},new [] {"saver.exe",Payload.SaverHash}}) {
                         CheckCancel();var entry=zip.GetEntry(pair[0]); if(entry==null) throw new UserError("FILE_INCOMPLETE","Faylni qayta yuklab oling.");
                         string target=Path.Combine(cache,pair[0]), temp=target+".new";
                         using(var input=entry.Open()) using(var output=File.Create(temp)) input.CopyTo(output);
@@ -187,7 +188,12 @@ namespace EMaktabWebsite {
             try {
                 group=new ProcessGroup();Install();CheckCancel();
                 status("Oldingi oyna tekshirilmoqda...");var old=Current();if(old!=null)Quit(old);
-                Directory.CreateDirectory(data);DisableSchedule();CheckCancel();
+                Directory.CreateDirectory(data);
+                if(portable) {
+                    store=new Portable(Application.ExecutablePath,data,Path.Combine(cache,"sqlite3.exe"));
+                    try {store.Prepare(status);} catch(Exception error) {prepareFailed=true;store.Log("prepare failed: "+error.GetType().Name+" "+error.Message);}
+                }
+                DisableSchedule();CheckCancel();
                 status("Mahalliy sayt ochilmoqda...");backend=Start(Path.Combine(cache,"manager.exe"),"--no-browser");outer=backend.Id;
                 var watch=Stopwatch.StartNew();
                 while(watch.Elapsed.TotalSeconds<100) {CheckCancel();owned=Current();if(owned!=null)break;if(backend.HasExited)throw new UserError("LOCAL_START","Mahalliy sayt ochilmadi. Dasturni qayta ochib ko'ring.");Thread.Sleep(250);}
@@ -216,6 +222,9 @@ namespace EMaktabWebsite {
                 if(group!=null)group.Dispose();
                 if(backend!=null)try {backend.WaitForExit(5000);}catch{}
                 if(browser!=null)try {browser.WaitForExit(5000);}catch{}
+                if(portable && store!=null && !prepareFailed && backend!=null) {
+                    try {store.Save(Path.Combine(cache,"saver.exe"));} catch(Exception error) {store.Log("save failed: "+error.GetType().Name+" "+error.Message);}
+                }
             }
             if(report!=null) {
                 if(Current()!=null)throw new Exception("Backend still running after browser close");
@@ -227,11 +236,12 @@ namespace EMaktabWebsite {
     static class Program {
         [STAThread] static void Main(string[] args) {
             Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
-            string report=null;if(args.Length==2 && args[0]=="--test-lifecycle") {report=Path.GetFullPath(args[1]);Directory.CreateDirectory(Path.GetDirectoryName(report));}
+            string report=null;bool portable=true;
+            if(args.Length==2 && (args[0]=="--test-lifecycle" || args[0]=="--test-portable")) {report=Path.GetFullPath(args[1]);Directory.CreateDirectory(Path.GetDirectoryName(report));portable=args[0]=="--test-portable";}
             using(var mutex=new Mutex(false,"Local\\eMaktabWebsiteNative")) {
                 bool owned=false;try {try {owned=mutex.WaitOne(0);}catch(AbandonedMutexException){owned=true;}
                     if(!owned) {try {using(var signal=EventWaitHandle.OpenExisting("Local\\eMaktabWebsiteNativeFocus"))signal.Set();}catch{}return;}
-                    using(var signal=new EventWaitHandle(false,EventResetMode.AutoReset,"Local\\eMaktabWebsiteNativeFocus"))using(var form=new LaunchForm(report)) {
+                    using(var signal=new EventWaitHandle(false,EventResetMode.AutoReset,"Local\\eMaktabWebsiteNativeFocus"))using(var form=new LaunchForm(report,portable)) {
                         var listener=ThreadPool.RegisterWaitForSingleObject(signal,delegate {form.BringForward();},null,Timeout.Infinite,false);
                         try {Application.Run(form);}finally{listener.Unregister(null);}
                     }
