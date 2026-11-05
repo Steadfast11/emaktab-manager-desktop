@@ -39,7 +39,7 @@ def main():
     command += ['/reference:' + name for name in ['System.Windows.Forms.dll', 'System.Drawing.dll', 'System.Web.Extensions.dll', 'System.IO.Compression.dll', 'System.IO.Compression.FileSystem.dll']]
     command += [str(source / 'Launcher.cs'), str(source / 'Portable.cs'), str(manifest)]
     subprocess.run(command, check=True)
-    result = {'artifact': output.name, 'sha256': sha(output), 'size_bytes': output.stat().st_size, 'wrapper_version': '1.2.0', 'backend_version': '1.0.1',
+    result = {'artifact': output.name, 'sha256': sha(output), 'size_bytes': output.stat().st_size, 'wrapper_version': '1.2.1', 'backend_version': '1.0.1',
               'console_subsystem': False, 'payload_entries': ['manager.exe', 'sqlite3.exe', 'saver.exe'], 'portable_accounts_in_exe': True,
               'contains_customer_data': False, 'publisher_signed': False, 'built_with': 'mono csc (cross-build)'}
     (a.out / 'build-result.json').write_text(json.dumps(result, indent=2) + '\n')
