@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import secrets
+import traceback
 from typing import Literal
 import sqlite3
 from resilience import ClosingConnection, CircuitBreaker, CooldownScheduler, RateLimitDetector, Outcome, SessionStore, session_evaluation
@@ -274,7 +275,14 @@ class Runner:
             except Exception as error:
                 kind = type(error).__name__
                 loop = type(asyncio.get_running_loop()).__name__
-                message = f'Brauzer ochilmadi [{kind}/{loop}]. Shu kodni dastur egasiga yuboring.'
+                detail = f'{kind}/{loop}'
+                if isinstance(error, OSError):
+                    detail += f' winerror={getattr(error, "winerror", None)} errno={error.errno} {error.strerror or ""}'.rstrip()
+                try:
+                    (DATA / 'browser-error.log').write_text(now() + '\n' + traceback.format_exc(), encoding='utf-8')
+                except Exception:
+                    pass
+                message = f'Brauzer ochilmadi [{detail}]. Shu kodni dastur egasiga yuboring.'
                 for a in public_accounts():
                     if a['status'] in ('queued', 'running'):
                         update(a['id'], 'failed', message)
