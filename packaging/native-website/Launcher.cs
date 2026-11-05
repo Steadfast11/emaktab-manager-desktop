@@ -16,8 +16,8 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("eMaktab")]
 [assembly: AssemblyProduct("eMaktab")]
-[assembly: AssemblyVersion("1.2.1.0")]
-[assembly: AssemblyFileVersion("1.2.1.0")]
+[assembly: AssemblyVersion("1.2.2.0")]
+[assembly: AssemblyFileVersion("1.2.2.0")]
 
 namespace EMaktabWebsite {
     sealed class UserError : Exception {
@@ -96,7 +96,7 @@ namespace EMaktabWebsite {
             using(var dialog=new Form {Text="eMaktab",ClientSize=new Size(490,210),FormBorderStyle=FormBorderStyle.FixedDialog,StartPosition=FormStartPosition.CenterScreen,MaximizeBox=false,MinimizeBox=false}) {
                 var text=new Label {Text=message+"\n\nYordam kodi: "+code,Location=new Point(24,22),Size=new Size(440,125),Font=new Font("Segoe UI",11)};
                 var copy=new Button {Text="Kodni nusxalash",Location=new Point(175,158),Size=new Size(140,32)};
-                copy.Click+=delegate { try { Clipboard.SetText("eMaktab 1.2.1 | "+code); copy.Text="Nusxalandi"; } catch {} };
+                copy.Click+=delegate { try { Clipboard.SetText("eMaktab 1.2.2 | "+code); copy.Text="Nusxalandi"; } catch {} };
                 var close=new Button {Text="Yopish",Location=new Point(328,158),Size=new Size(132,32),DialogResult=DialogResult.OK};
                 dialog.Controls.Add(text);dialog.Controls.Add(copy);dialog.Controls.Add(close);dialog.AcceptButton=close;dialog.CancelButton=close;dialog.ShowDialog(owner);
             }
@@ -157,14 +157,17 @@ namespace EMaktabWebsite {
             while(watch.Elapsed.TotalSeconds<40) {var live=Current();if(live==null || live.Instance!=server.Instance)return;Thread.Sleep(250);}
             throw new UserError("OLD_WINDOW","Oldingi eMaktab oynasini yoping va qayta urinib ko'ring.");
         }
-        Process Start(string file,string arguments) {
+        Process Start(string file,string arguments) {return Start(file,arguments,true);}
+        Process Start(string file,string arguments,bool redirect) {
             // A windowed launcher has no valid std handles; children would inherit them and
             // Playwright's node spawn fails with WinError 6. Give every child real, drained pipes.
-            var info=new ProcessStartInfo(file,arguments) {UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=cache,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};
+            var info=new ProcessStartInfo(file,arguments) {UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=cache,RedirectStandardInput=redirect,RedirectStandardOutput=redirect,RedirectStandardError=redirect};
             info.EnvironmentVariables["EMAKTAB_DATA_DIR"]=data;
             var process=Process.Start(info);
-            process.OutputDataReceived+=delegate {};process.ErrorDataReceived+=delegate {};
-            process.BeginOutputReadLine();process.BeginErrorReadLine();
+            if(redirect) {
+                process.OutputDataReceived+=delegate {};process.ErrorDataReceived+=delegate {};
+                process.BeginOutputReadLine();process.BeginErrorReadLine();
+            }
             group.Add(process);return process;
         }
         void DisableSchedule() {
@@ -210,8 +213,26 @@ namespace EMaktabWebsite {
                 File.AppendAllText(Stylesheet(),"\n.lower>article:first-child{display:none!important}.lower{grid-template-columns:1fr!important}\n",new UTF8Encoding(false));
                 CheckCancel();status("Brauzer ochilmoqda...");
                 string profile=Path.Combine(data,"website-native-ui-profile");
-                browser=Start(BrowserPath(),"--app="+owned.Base+"/ --user-data-dir=\""+profile+"\" --disable-background-mode --no-first-run --no-default-browser-check");chrome=browser.Id;
-                watch.Restart();while(watch.Elapsed.TotalSeconds<15) {CheckCancel();if(browser.HasExited)throw new UserError("BROWSER_START","Brauzer oynasi ochilmadi. Dasturni qayta ochib ko'ring.");browser.Refresh();if(browser.MainWindowHandle!=IntPtr.Zero){opened=true;break;}Thread.Sleep(250);}
+                string browserFile=BrowserPath();DateTime launched=DateTime.Now.AddSeconds(-3);
+                browser=Start(browserFile,"--app="+owned.Base+"/ --user-data-dir=\""+profile+"\" --disable-background-mode --no-first-run --no-default-browser-check",false);chrome=browser.Id;
+                // First start with a new profile can be slow, and Edge/Chrome may hand the window to a second process.
+                watch.Restart();while(watch.Elapsed.TotalSeconds<90) {
+                    CheckCancel();
+                    if(browser.HasExited) {
+                        Process alt=null;
+                        foreach(var candidate in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(browserFile))) {
+                            try {if(alt==null && candidate.StartTime>=launched && candidate.MainWindowHandle!=IntPtr.Zero)alt=candidate;} catch {}
+                        }
+                        if(alt==null) {
+                            if(watch.Elapsed.TotalSeconds>25)throw new UserError("BROWSER_START","Brauzer oynasi ochilmadi. Dasturni qayta ochib ko'ring.");
+                            Thread.Sleep(250);continue;
+                        }
+                        browser=alt;chrome=alt.Id;try {group.Add(alt);} catch {}
+                        opened=true;break;
+                    }
+                    browser.Refresh();if(browser.MainWindowHandle!=IntPtr.Zero){opened=true;break;}
+                    Thread.Sleep(250);
+                }
                 if(!opened)throw new UserError("BROWSER_WINDOW","Brauzer oynasi ko'rinmadi. Qayta urinib ko'ring.");
                 FocusBrowser();ready();
                 if(report!=null) {
