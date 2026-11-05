@@ -183,7 +183,6 @@ class Runner:
                 with connect() as c:
                     rows = list(c.execute('SELECT * FROM accounts WHERE id=? ORDER BY rowid', (account_id,))) if account_id else list(c.execute('SELECT * FROM accounts ORDER BY rowid'))
                 for row in rows:
-                    breaker.assert_allowed()
                     aid = row['id']
                     self.current = aid
                     update(aid, 'running', 'Alohida sessiya tekshirilmoqda')
@@ -267,7 +266,7 @@ class Runner:
                             if context in self.contexts:
                                 self.contexts.remove(context)
                     self.current = None
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(.3)
             except StopCycle:
                 pass
             except asyncio.CancelledError:
@@ -311,10 +310,6 @@ class Runner:
         return False
 
     def start(self, headed, mode='web', account_id=None):
-        try:
-            breaker.assert_allowed()
-        except ValueError as e:
-            raise HTTPException(409, str(e))
         if self.task and not self.task.done():
             raise HTTPException(409, 'Ish allaqachon davom etmoqda')
         if mode != 'web':
@@ -332,7 +327,8 @@ async def scheduler():
         dt = datetime.now(TZ)
         licensed = getattr(app.state, 'license_check', lambda: True)()
         if licensed and s['enabled'] and dt.strftime('%H:%M') == s['time'] and s['last_date'] != dt.date().isoformat() and public_accounts():
-            if (not runner.task or runner.task.done()) and breaker.status()['state'] == 'IDLE':
+            if not runner.task or runner.task.done():
+                breaker.clear()
                 with connect() as c:
                     c.execute('UPDATE settings SET last_date=? WHERE id=1', (dt.date().isoformat(),))
                 runner.start(False, 'web')
@@ -499,13 +495,7 @@ async def delete(aid: str):
 
 @app.post('/api/run')
 async def run(options: Run):
-    state = breaker.status()
-    if state['state'] == 'PAUSED_REVIEW' and state['blocked_at'] == 0:
-        breaker.resume()
-    try:
-        breaker.assert_allowed()
-    except ValueError as e:
-        raise HTTPException(409, str(e))
+    breaker.clear()
     if not public_accounts():
         raise HTTPException(400, 'Avval akkaunt qo‘shing')
     if options.account_id and not any(a['id'] == options.account_id for a in public_accounts()):

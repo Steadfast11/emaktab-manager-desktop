@@ -116,6 +116,12 @@ class CircuitBreaker:
             deadline = self.clock()+self.cooldown.next_delay(n, detection.retry_after_seconds)
             c.execute("UPDATE breaker SET state='PAUSED_RATE_LIMIT',blocked_at=?,blocked_until=max(blocked_until,?),attempt=attempt+1,evidence=? WHERE id=1", (self.clock(), deadline, detection.evidence_code))
 
+    def clear(self):
+        """Forget any pause: the user decides when to run again, nothing is locked."""
+        with self.db() as c:
+            c.execute("UPDATE breaker SET state='IDLE',blocked_at=0,blocked_until=0,attempt=0 WHERE id=1")
+            c.execute('DELETE FROM recovery_attempts')
+
     def pause_review(self):
         with self.db() as c:
             c.execute("UPDATE breaker SET state='PAUSED_REVIEW',evidence='NO_AUTH_PROOF' WHERE id=1 AND state!='PAUSED_RATE_LIMIT'")

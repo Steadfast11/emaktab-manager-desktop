@@ -115,3 +115,12 @@ def test_browser_reuses_encrypted_session_without_resubmitting_password(monkeypa
     asyncio.run(scenario())
     assert observed==['GET']
     assert m.public_accounts()[0]['status']=='success'
+
+
+def test_clear_removes_every_pause_so_a_run_is_never_locked(tmp_path):
+    b = CircuitBreaker(tmp_path / 'b')
+    b.pause_rate()
+    assert b.status()['state'] == 'PAUSED_RATE_LIMIT'
+    b.clear()
+    assert b.status()['state'] == 'IDLE' and b.status()['remaining_seconds'] == 0
+    b.assert_allowed()

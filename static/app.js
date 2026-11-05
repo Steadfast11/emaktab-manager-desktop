@@ -1,42 +1,145 @@
 const $=id=>document.getElementById(id);
-let groups=[], activeGroup=null, editingGroup=null, groupsKey="";
-let desktopClosing=false;
-let editing=null, initial=true, accountSignature="", logsSignature="";
 const names={idle:'Tayyor',queued:'Navbatda',running:'Kirilmoqda',success:'Tasdiqlandi',failed:'Xato',waiting:'Qo‘lda kirish',unverified:'Tasdiqlanmadi',cancelled:'To‘xtatildi',interrupted:'Uzilgan',rate_limited:'Limit',skipped:'O‘tkazildi'};
-async function api(path,method='GET',body){const r=await fetch('/api/'+path,{method,headers:{'Content-Type':'application/json','X-Manager':'1'},body:body===undefined?undefined:JSON.stringify(body)});const data=await r.json();if(!r.ok)throw Error(typeof data.detail==='string'?data.detail:'So‘rov bajarilmadi');return data;}
-function element(tag,text,cls){const e=document.createElement(tag);if(text)e.textContent=text;if(cls)e.className=cls;return e;}
-async function openEditor(a){try{const values=a?await api('accounts/'+a.id+'/editor','POST',{}):{label:'',login:'',password:''};editing=a?.id||null;$('account-form').reset();setPasswordVisible(false);$('account-group').replaceChildren(...groups.map(g=>{const option=element('option',g.name);option.value=g.id;return option;}));$('account-group').value=a?.group_id||activeGroup||'default';$('label').value=values.label;$('login').value=values.login;$('password').value=values.password;$('form-title').textContent=a?'Akkauntni tahrirlash':'Akkaunt qo‘shish';$('form-error').textContent='';$('editor').showModal();}catch(e){$('message').textContent=e.message;}}
+const ATTENTION=['failed','unverified','rate_limited','interrupted','waiting'];
+let groups=[{id:'default',name:'Asosiy'}], activeGroup=null, editing=null, editingGroup=null;
+let closing=false, running=false, accountSig='', groupSig='', logSig='', lastAccounts=[];
 
-async function refresh(){try{const s=await api('state');if(desktopClosing)return;desktopControls(s);groups=s.groups||[{id:'default',name:'Asosiy'}];const nextGroups=JSON.stringify([groups,s.accounts.map(a=>a.group_id),s.running]);if(nextGroups!==groupsKey){groupsKey=nextGroups;renderGroups(s.accounts,s.running);}$('add-group').disabled=s.running;$('rename-group').disabled=s.running||!activeGroup;$('connection').textContent=s.running?'Ish davom etmoqda':'Mahalliy server ulangan';const paused=s.breaker&&(s.breaker.state==='PAUSED_RATE_LIMIT'||(s.breaker.state==='PAUSED_REVIEW'&&s.breaker.blocked_at>0));$('run').disabled=s.running||!s.accounts.length||paused;if(s.breaker){const b=s.breaker;const stateNames={IDLE:'Tayyor',HALF_OPEN:'Bitta tiklanish urinishiga ruxsat',PAUSED_RATE_LIMIT:'Kirish limiti sabab to‘xtatilgan',PAUSED_REVIEW:'Qo‘lda tekshirish kerak'};$('breaker-message').textContent=(stateNames[b.state]||b.state)+' · Kutish: '+b.remaining_seconds+' soniya · 24 soatda qolgan qayta urinishlar: '+b.recoveries_remaining;$('resume').disabled=s.running||!(b.can_resume||(b.state==='PAUSED_REVIEW'&&b.blocked_at===0));}$('add').disabled=s.running;$('add-top').disabled=s.running;$('dock-add').disabled=s.running;$('dock-run').disabled=$('run').disabled;$('dock-run').lastChild.textContent=s.running?' Tekshirilmoqda…':' Barchasiga kirish';$('run-notice').hidden=!paused;$('run-notice').textContent=paused?'Kirish himoyasi faollashgan. «Ulanish va boshqaruv» bo‘limida kutish holatini ko‘ring.':'';$('dock-stop').disabled=!s.running;$('count-total').textContent=s.accounts.length;$('count-success').textContent=s.accounts.filter(a=>a.status==='success').length;$('count-attention').textContent=s.accounts.filter(a=>['failed','unverified','rate_limited','interrupted'].includes(a.status)).length;document.body.classList.toggle('is-running',s.running);$('run').textContent=s.running?'Tekshirilmoqda…':'Barchasiga kirish ↗';const signature=JSON.stringify([s.accounts,s.running,paused]);if(signature!==accountSignature){accountSignature=signature;$('accounts').replaceChildren();if(!s.accounts.length)$('accounts').append(element('div','Hozircha akkaunt yo‘q. Birinchi akkauntingizni qo‘shing.','empty'));s.accounts.forEach((a,i)=>{const row=element('article',null,'account');row.dataset.login=a.login.toLowerCase();row.dataset.id=a.id;row.dataset.group=a.group_id||'default';row.append(element('div',String(i+1).padStart(2,'0'),'number'));const info=element('div',null,'info');info.append(element('h3',a.login),element('p',a.detail||'Login va parol shifrlangan holda saqlanadi'));row.append(info,element('span',names[a.status]||a.status,'status '+a.status));const edit=element('button','Tahrirlash');edit.disabled=s.running;edit.onclick=()=>openEditor(a);const del=element('button','O‘chirish');del.disabled=s.running;del.onclick=async()=>{if(confirm(a.label+' akkauntini o‘chirish?'))await action(()=>api('accounts/'+a.id,'DELETE'));};const runOne=element('button','Run');runOne.disabled=s.running||paused;runOne.onclick=()=>action(()=>api('run','POST',{headed:$('headed').checked,account_id:a.id}));runOne.className='account-run';edit.className='account-edit';del.className='account-delete';const actions=element('div',null,'account-actions');actions.append(runOne,edit,del);row.append(actions);$('accounts').append(row);});filterAccounts();}const logKey=JSON.stringify(s.logs);if(logKey!==logsSignature){logsSignature=logKey;$('logs').replaceChildren();const labels=Object.fromEntries(s.accounts.map(a=>[a.id,a.login]));for(const l of s.logs){const row=element('div',null,'log');row.append(element('time',new Date(l.time).toLocaleString('uz-UZ',{timeZone:'Asia/Samarkand'})),element('span',(labels[l.account_id]||'Akkaunt')+' · '+l.message));$('logs').append(row);}if(!s.logs.length)$('logs').textContent='Birinchi kirishdan so‘ng natijalar shu yerda ko‘rinadi.';}if(initial){$('enabled').checked=!!s.schedule.enabled;$('time').value=s.schedule.time;initial=false;}}catch(e){if(desktopClosing)return;$('connection').textContent='Server bilan aloqa yo‘q';$('message').textContent=e.message;}}
-async function action(fn){try{await fn();$('message').textContent='';await refresh();}catch(e){$('message').textContent=e.message;}}
-$('add').onclick=()=>openEditor();$('cancel').onclick=()=>{$('editor').close();$('account-form').reset();};$('editor').addEventListener('close',()=>{$('account-form').reset();setPasswordVisible(false);});$('account-form').onsubmit=async e=>{e.preventDefault();try{await api('accounts'+(editing?'/'+editing:''),editing?'PUT':'POST',{group_id:$('account-group').value,label:$('label').value,login:$('login').value,password:$('password').value});$('account-form').reset();$('editor').close();await refresh();}catch(err){$('form-error').textContent=err.message;}};$('run').onclick=()=>action(()=>api('run','POST',{headed:$('headed').checked}));$('stop').onclick=()=>action(()=>api('stop','POST',{}));$('schedule').onsubmit=e=>{e.preventDefault();action(async()=>{await api('schedule','PUT',{enabled:$('enabled').checked,time:$('time').value});});};refresh();setInterval(()=>{if(!document.hidden)refresh();},2000);
+async function api(path,method='GET',body){
+  const r=await fetch('/api/'+path,{method,headers:{'Content-Type':'application/json','X-Manager':'1'},body:body===undefined?undefined:JSON.stringify(body)});
+  let data={};try{data=await r.json();}catch(e){}
+  if(!r.ok)throw Error(typeof data.detail==='string'?data.detail:'So‘rov bajarilmadi');
+  return data;
+}
+function el(tag,text,cls){const e=document.createElement(tag);if(text!==undefined&&text!==null)e.textContent=text;if(cls)e.className=cls;return e;}
+function say(text,bad){const m=$('message');m.textContent=text||'';m.className=text?(bad?'bad':'good'):'';}
+async function action(fn){try{await fn();say('');await refresh();}catch(e){say(e.message,true);}}
+const groupName=id=>(groups.find(g=>g.id===id)||{name:'—'}).name;
 
-$('resume').onclick=()=>action(()=>api('resilience/resume','POST',{}));
-async function labRequest(path,body){const r=await fetch('/simulation/'+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-Manager':'1'},body:body===undefined?undefined:JSON.stringify(body)});const data=await r.json();const labels={SUCCESS:'Kirish tasdiqlandi',BAD_CREDENTIALS:'Login/parol rad etildi — akkaunt o‘tkaziladi',RATE_LIMIT:'Kirish limiti — barcha akkauntlar to‘xtaydi',RATE_LIMIT_EXPIRED:'Soxta serverdagi limit tugatilgan'};const code=data.event||data.outcome||data.code;const text=data.detail||(code?code+' · '+(labels[code]||''):'Kutish holati yangilandi');$('lab-result').textContent=text+(data.http_status?' · Server javobi: '+data.http_status:'')+(data.breaker?' · Kutish: '+data.breaker.remaining_seconds+' s':'');await labState();}
-async function labState(){try{const r=await fetch('/simulation/state');const s=await r.json();$('lab-state').textContent='Sinov holati: '+({IDLE:'Tayyor',HALF_OPEN:'Bitta tiklanish urinishi',PAUSED_RATE_LIMIT:'Limit sabab to‘xtatilgan',PAUSED_REVIEW:'Tekshirish kerak'}[s.breaker.state]||s.breaker.state)+' · Manager kutishi: '+s.breaker.remaining_seconds+' s · Server kutishi: '+s.backend_wait+' s';}catch(e){$('lab-state').textContent='Mahalliy sinov serveri bilan aloqa yo‘q';}}
-function labCase(){return {scenario:$('lab-scenario').value,identity:$('lab-identity').value};}
-$('lab-step').onclick=()=>labRequest('step',labCase()).catch(e=>$('lab-result').textContent=e.message);
-$('lab-direct').onclick=()=>labRequest('login',labCase()).catch(e=>$('lab-result').textContent=e.message);
-$('lab-resume').onclick=()=>labRequest('resume',{}).catch(e=>$('lab-result').textContent=e.message);
-labState();setInterval(labState,3000);
+/* ---------- ro‘yxat ---------- */
+function renderGroups(accounts){
+  const box=$('group-tabs');box.replaceChildren();
+  for(const g of [{id:null,name:'Barchasi'},...groups]){
+    const n=accounts.filter(a=>g.id===null||(a.group_id||'default')===g.id).length;
+    const b=el('button',g.name+' · '+n,'tab');b.type='button';b.setAttribute('aria-pressed',String(activeGroup===g.id));
+    b.onclick=()=>{activeGroup=g.id;groupSig='';renderGroups(lastAccounts);filterAccounts();syncButtons();};
+    box.append(b);
+  }
+}
+function renderAccounts(accounts,isRunning){
+  const box=$('accounts');box.replaceChildren();
+  if(!accounts.length){box.append(el('div','Hozircha akkaunt yo‘q. «＋ Akkaunt» yoki «Ko‘plab qo‘shish» tugmasini bosing.','empty'));return;}
+  accounts.forEach((a,i)=>{
+    const row=el('article',null,'account');row.dataset.login=(a.login+' '+a.label).toLowerCase();row.dataset.group=a.group_id||'default';
+    row.append(el('span',String(i+1),'num'));
+    const who=el('div',null,'who');who.append(el('strong',a.label),el('span',a.login));row.append(who);
+    row.append(el('span',groupName(a.group_id||'default'),'gname'));
+    const st=el('div',null,'state');st.append(el('span',names[a.status]||a.status,'badge s-'+a.status));if(a.detail)st.append(el('small',a.detail));row.append(st);
+    const act=el('div',null,'row-actions');
+    const go=el('button','▶','icon');go.title='Faqat shu akkauntga kirish';go.disabled=isRunning;go.onclick=()=>action(()=>api('run','POST',{headed:$('headed').checked,account_id:a.id}));
+    const ed=el('button','✎','icon');ed.title='Tahrirlash';ed.disabled=isRunning;ed.onclick=()=>openEditor(a);
+    const del=el('button','🗑','icon danger');del.title='O‘chirish';del.disabled=isRunning;del.onclick=async()=>{if(confirm(a.label+' akkauntini o‘chirish?'))await action(()=>api('accounts/'+a.id,'DELETE'));};
+    act.append(go,ed,del);row.append(act);box.append(row);
+  });
+  filterAccounts();
+}
+function filterAccounts(){
+  const q=$('account-search').value.trim().toLowerCase();let visible=0;
+  document.querySelectorAll('.account').forEach(r=>{r.hidden=!r.dataset.login.includes(q)||(activeGroup!==null&&r.dataset.group!==activeGroup);if(!r.hidden)visible++;});
+  $('search-count').textContent=q?visible+' ta':'';
+  const e=$('search-empty');const any=document.querySelectorAll('.account').length>0;
+  e.hidden=!any||visible>0;e.textContent=q?'Bunday akkaunt topilmadi.':'Bu bo‘limda akkaunt yo‘q.';
+}
+function syncButtons(){$('rename-group').disabled=running||!activeGroup;}
 
-$('lab-reset').onclick=()=>labRequest('reset',{}).catch(e=>$('lab-result').textContent=e.message);
+async function refresh(){
+  try{
+    const s=await api('state');if(closing)return;
+    desktopControls(s);
+    groups=s.groups||groups;lastAccounts=s.accounts;running=s.running;
+    $('connection').textContent=s.running?'Ish davom etmoqda…':'Tayyor';$('connection').className='pill'+(s.running?' busy':'');
+    const gsig=JSON.stringify([groups,s.accounts.map(a=>a.group_id),activeGroup]);
+    if(gsig!==groupSig){groupSig=gsig;renderGroups(s.accounts);}
+    const asig=JSON.stringify([s.accounts,s.running,groups]);
+    if(asig!==accountSig){accountSig=asig;renderAccounts(s.accounts,s.running);}
+    $('count-total').textContent=s.accounts.length;
+    $('count-success').textContent=s.accounts.filter(a=>a.status==='success').length;
+    $('count-attention').textContent=s.accounts.filter(a=>ATTENTION.includes(a.status)).length;
+    $('count-left').textContent=s.accounts.filter(a=>a.status==='queued'||a.status==='running').length;
+    $('run').disabled=s.running||!s.accounts.length;$('run').textContent=s.running?'Tekshirilmoqda…':'▶ Barchasiga kirish';
+    $('stop').disabled=!s.running;
+    for(const id of ['add','bulk','add-group'])$(id).disabled=s.running;
+    syncButtons();
+    const lsig=JSON.stringify(s.logs);
+    if(lsig!==logSig){logSig=lsig;const box=$('logs');box.replaceChildren();const names2=Object.fromEntries(s.accounts.map(a=>[a.id,a.login]));
+      for(const l of s.logs){const r=el('div',null,'log');r.append(el('time',new Date(l.time).toLocaleString('uz-UZ',{timeZone:'Asia/Samarkand'})),el('span',(names2[l.account_id]||'Akkaunt')+' · '+l.message));box.append(r);}
+      if(!s.logs.length)box.textContent='Hali hodisa yo‘q.';}
+    if(!refresh.init){refresh.init=true;$('enabled').checked=!!s.schedule.enabled;$('time').value=s.schedule.time;}
+  }catch(e){$('connection').textContent='Aloqa yo‘q';}
+}
 
-function setPasswordVisible(visible){$('password').type=visible?'text':'password';const label=visible?'Parolni yashirish':'Parolni ko‘rsatish';$('toggle-password').setAttribute('aria-label',label);$('toggle-password').title=label;$('toggle-password').setAttribute('aria-pressed',String(visible));$('toggle-password').classList.toggle('is-visible',visible);$('eye-slash').removeAttribute('hidden');}
-$('toggle-password').onclick=()=>{const button=$('toggle-password');setPasswordVisible($('password').type==='password');if(!matchMedia('(prefers-reduced-motion: reduce)').matches){button.classList.remove('eye-pop');void button.offsetWidth;button.classList.add('eye-pop');}};
-$('toggle-password').addEventListener('animationend',e=>{if(e.target===$('toggle-password'))$('toggle-password').classList.remove('eye-pop');});
-$('toggle-password').addEventListener('pointermove',e=>{const rect=e.currentTarget.getBoundingClientRect();e.currentTarget.style.setProperty('--eye-x',((e.clientX-rect.left)/rect.width-.5)*3+'px');e.currentTarget.style.setProperty('--eye-y',((e.clientY-rect.top)/rect.height-.5)*3+'px');});
-$('toggle-password').addEventListener('pointerleave',e=>{e.currentTarget.style.setProperty('--eye-x','0px');e.currentTarget.style.setProperty('--eye-y','0px');});
-setPasswordVisible(false);
+/* ---------- bitta akkaunt ---------- */
+function fillGroups(select,value){select.replaceChildren(...groups.map(g=>{const o=el('option',g.name);o.value=g.id;return o;}));select.value=value;}
+async function openEditor(a){
+  try{
+    const v=a?await api('accounts/'+a.id+'/editor','POST',{}):{label:'',login:'',password:''};
+    editing=a?a.id:null;$('account-form').reset();setPasswordVisible(false);
+    fillGroups($('account-group'),(a&&a.group_id)||activeGroup||'default');
+    $('label').value=v.label;$('login').value=v.login;$('password').value=v.password;
+    $('form-title').textContent=a?'Akkauntni tahrirlash':'Akkaunt qo‘shish';$('form-error').textContent='';$('editor').showModal();
+  }catch(e){say(e.message,true);}
+}
+function setPasswordVisible(v){$('password').type=v?'text':'password';$('toggle-password').setAttribute('aria-pressed',String(v));$('toggle-password').textContent=v?'🙈':'👁';}
+$('toggle-password').onclick=()=>setPasswordVisible($('password').type==='password');
+$('add').onclick=()=>openEditor();
+$('cancel').onclick=()=>$('editor').close();
+$('account-form').onsubmit=async e=>{e.preventDefault();try{await api('accounts'+(editing?'/'+editing:''),editing?'PUT':'POST',{group_id:$('account-group').value,label:$('label').value,login:$('login').value,password:$('password').value});$('editor').close();await refresh();}catch(err){$('form-error').textContent=err.message;}};
 
-function filterAccounts(){const query=$('account-search').value.trim().toLowerCase();let visible=0;document.querySelectorAll('.account').forEach(row=>{row.hidden=!row.dataset.login.includes(query)||(activeGroup!==null&&row.dataset.group!==activeGroup);if(!row.hidden)visible++;});$('search-count').textContent=query?visible+' ta':'';let empty=$('search-empty');if(!empty){empty=element('p','Bu login bo‘yicha akkaunt topilmadi.','empty');empty.id='search-empty';$('accounts').after(empty);}empty.textContent=query?'Bu login bo‘yicha akkaunt topilmadi.':'Bu bo‘limda hali akkaunt yo‘q. Qo‘shish tugmasi orqali kiriting.';empty.hidden=(!query&&!activeGroup)||visible>0;}
+/* ---------- bo‘limlar ---------- */
+function openGroupEditor(rename){editingGroup=rename?activeGroup:null;$('group-name').value=rename?groupName(activeGroup):'';$('group-title').textContent=rename?'Bo‘lim nomini o‘zgartirish':'Yangi bo‘lim';$('group-error').textContent='';$('group-editor').showModal();}
+$('add-group').onclick=()=>openGroupEditor(false);$('rename-group').onclick=()=>openGroupEditor(true);$('group-cancel').onclick=()=>$('group-editor').close();
+$('group-form').onsubmit=async e=>{e.preventDefault();try{const r=await api('groups'+(editingGroup?'/'+editingGroup:''),editingGroup?'PUT':'POST',{name:$('group-name').value.trim()});if(!editingGroup)activeGroup=r.id;groupSig='';$('group-editor').close();await refresh();}catch(err){$('group-error').textContent=err.message;}};
+
+/* ---------- ko‘plab qo‘shish ---------- */
+function parseBulk(text,common){
+  const out=[],bad=[];
+  text.split(/\r?\n/).forEach((raw,i)=>{
+    const line=raw.trim();if(!line)return;
+    const parts=line.split(/[\t;,]+\s*|\s+/).filter(Boolean);
+    const login=parts[0];let password,label;
+    if(common){password=common;label=parts.slice(1).join(' ');}else{password=parts[1];label=parts.slice(2).join(' ');}
+    if(!login||!password){bad.push(i+1);return;}
+    out.push({login,password,label:(label||login).slice(0,60)});
+  });
+  return {out,bad};
+}
+$('bulk').onclick=()=>{fillGroups($('bulk-group'),activeGroup||'default');$('bulk-result').textContent='';$('bulk-result').className='';$('bulk-submit').disabled=false;$('bulk-editor').showModal();};
+$('bulk-cancel').onclick=()=>$('bulk-editor').close();
+$('bulk-form').onsubmit=async e=>{
+  e.preventDefault();const r=$('bulk-result');
+  const {out,bad}=parseBulk($('bulk-text').value,$('bulk-password').value.trim());
+  if(!out.length){r.textContent='Akkaunt topilmadi. Har qatorda kamida login va parol bo‘lsin.';r.className='bad';return;}
+  $('bulk-submit').disabled=true;let added=0;const failed=[];
+  for(const a of out){
+    r.textContent='Qo‘shilmoqda… '+(added+failed.length+1)+' / '+out.length;r.className='';
+    try{await api('accounts','POST',{group_id:$('bulk-group').value,label:a.label,login:a.login,password:a.password});added++;}catch(err){failed.push(a.login+' ('+err.message+')');}
+  }
+  r.textContent='Qo‘shildi: '+added+' ta.'+(failed.length?' Xato: '+failed.join(', '):'')+(bad.length?' O‘tkazilgan qatorlar: '+bad.join(', '):'');
+  r.className=failed.length||bad.length?'bad':'good';
+  if(added){$('bulk-text').value='';await refresh();}
+  $('bulk-submit').disabled=false;
+};
+
+/* ---------- boshqaruv ---------- */
+$('run').onclick=()=>action(()=>api('run','POST',{headed:$('headed').checked}));
+$('stop').onclick=()=>action(()=>api('stop','POST',{}));
+$('schedule').onsubmit=e=>{e.preventDefault();action(()=>api('schedule','PUT',{enabled:$('enabled').checked,time:$('time').value}));};
 $('account-search').addEventListener('input',filterAccounts);
-$('add-top').onclick=()=>openEditor();$('dock-add').onclick=()=>openEditor();$('dock-run').onclick=()=>$('run').click();$('dock-stop').onclick=()=>$('stop').click();
-document.addEventListener('click',e=>{const button=e.target.closest('button');if(!button||button.disabled||matchMedia('(prefers-reduced-motion: reduce)').matches)return;button.animate([{scale:1},{scale:.96},{scale:1}],{duration:230,easing:'cubic-bezier(.2,.8,.2,1)'});});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden){refresh();}});
-
-function renderGroups(accounts,running){$('group-tabs').replaceChildren();const all=[{id:null,name:'Barchasi'},...groups];for(const group of all){const count=accounts.filter(a=>group.id===null||(a.group_id||'default')===group.id).length;const button=element('button',group.name+' · '+count,'group-tab');button.type='button';button.setAttribute('aria-pressed',String(activeGroup===group.id));button.onclick=()=>{activeGroup=group.id;renderGroups(accounts,running);$('rename-group').disabled=running||!activeGroup;filterAccounts();};$('group-tabs').append(button);}}
-function openGroupEditor(rename){editingGroup=rename?activeGroup:null;$('group-name').value=rename?(groups.find(g=>g.id===activeGroup)?.name||''):'';$('group-title').textContent=rename?'Bo‘lim nomini o‘zgartirish':'Yangi bo‘lim';$('group-error').textContent='';$('group-editor').showModal();}
-$('add-group').onclick=()=>openGroupEditor(false);$('rename-group').onclick=()=>openGroupEditor(true);$('group-cancel').onclick=()=>$('group-editor').close();$('group-form').onsubmit=async event=>{event.preventDefault();try{const result=await api('groups'+(editingGroup?'/'+editingGroup:''),editingGroup?'PUT':'POST',{name:$('group-name').value.trim()});if(!editingGroup)activeGroup=result.id;groupsKey='';$('group-editor').close();await refresh();filterAccounts();}catch(error){$('group-error').textContent=error.message;}};
-
-function desktopControls(state){if(!state.desktop||$('desktop-quit'))return;const button=element('button','Dasturni yopish','desktop-quit');button.id='desktop-quit';button.type='button';button.onclick=async()=>{if(!confirm('Dasturni yopsangiz rejalashtirilgan ishlar ham to‘xtaydi. Yopilsinmi?'))return;try{await api('desktop/quit','POST',{});desktopClosing=true;button.disabled=true;button.textContent='Dastur yopildi';$('connection').textContent='Yopildi — oynani yopishingiz mumkin';$('run').disabled=true;$('dock-run').disabled=true;}catch(error){$('message').textContent=error.message;}};$('top').append(button);}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
+function desktopControls(state){
+  if(!state.desktop||$('desktop-quit'))return;
+  const b=el('button','Dasturni yopish','ghost');b.id='desktop-quit';b.type='button';
+  b.onclick=async()=>{if(!confirm('Dasturni yopsangiz rejalashtirilgan ishlar ham to‘xtaydi. Yopilsinmi?'))return;
+    try{await api('desktop/quit','POST',{});closing=true;b.disabled=true;b.textContent='Dastur yopildi';$('connection').textContent='Yopildi: oynani yopishingiz mumkin';$('run').disabled=true;}catch(err){say(err.message,true);}};
+  document.querySelector('.bar-actions').prepend(b);
+}
+refresh();setInterval(()=>{if(!document.hidden)refresh();},2000);
