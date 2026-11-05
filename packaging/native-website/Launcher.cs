@@ -177,8 +177,10 @@ namespace EMaktabWebsite {
             throw new UserError("WEBSITE_FILES","Sayt fayllari topilmadi. Dasturni qayta ochib ko'ring.");
         }
         string BrowserPath() {
+            string pf=Environment.GetEnvironmentVariable("ProgramFiles")??"", pf86=Environment.GetEnvironmentVariable("ProgramFiles(x86)")??"", local=Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            foreach(string path in new [] {Path.Combine(pf86,"Microsoft\\Edge\\Application\\msedge.exe"),Path.Combine(pf,"Microsoft\\Edge\\Application\\msedge.exe"),Path.Combine(pf,"Google\\Chrome\\Application\\chrome.exe"),Path.Combine(pf86,"Google\\Chrome\\Application\\chrome.exe"),Path.Combine(local,"Google\\Chrome\\Application\\chrome.exe")}) if(File.Exists(path))return path;
             string root=Path.Combine(data,"browser-cache");if(Directory.Exists(root))foreach(string file in Directory.EnumerateFiles(root,"chrome.exe",SearchOption.AllDirectories))return file;
-            throw new UserError("BROWSER_FILES","Brauzer tayyorlanmadi. Dasturni qayta ochib ko'ring.");
+            throw new UserError("BROWSER_FILES","Microsoft Edge yoki Google Chrome topilmadi. Birini o'rnating va dasturni qayta oching.");
         }
         public bool FocusBrowser() {
             try {if(browser==null || browser.HasExited)return false;browser.Refresh();IntPtr window=browser.MainWindowHandle;if(window==IntPtr.Zero)return false;Native.ShowWindowAsync(window,9);return Native.SetForegroundWindow(window);}catch{return false;}

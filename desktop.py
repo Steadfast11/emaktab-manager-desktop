@@ -73,7 +73,8 @@ def bind_socket(preferred=8766):
 def find_chrome():
     if sys.platform == 'darwin':
         candidates = [Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
-                      Path.home() / 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+                      Path.home() / 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+                      Path('/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge')]
     elif sys.platform == 'win32':
         candidates = [Path(os.environ.get(key, '')) / 'Google/Chrome/Application/chrome.exe'
                       for key in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA') if os.environ.get(key)]
@@ -139,7 +140,7 @@ def open_window(url, data):
         with sync_playwright() as pw:
             executable = pw.chromium.executable_path
         if not Path(executable).is_file():
-            raise RuntimeError('Chrome topilmadi. Google Chrome o‘rnating yoki to‘liq desktop paketdan foydalaning.')
+            raise RuntimeError('Google Chrome yoki Microsoft Edge topilmadi. Birini o‘rnating.')
     command = [executable, '--app=' + url, '--new-window', '--no-first-run', '--no-default-browser-check']
     # Reuse Chrome's UI process so activation brings the requested window forward.
     # Actual eMaktab authentication still uses separate bundled Playwright contexts.
@@ -215,6 +216,10 @@ def install_desktop_routes(app, server, token, instance, *, self_test=False):
             return {'ok': True, 'server_loop': type(asyncio.get_running_loop()).__name__, 'modes': tested}
 
 
+def manager_channels():
+    return ['msedge', 'chrome', 'chromium'] if sys.platform == 'win32' else ['chrome', 'msedge', 'chromium']
+
+
 def smoke_test(base, data):
     """Packaged offline acceptance test, using only an isolated synthetic account."""
     from playwright.sync_api import sync_playwright
@@ -237,7 +242,14 @@ def smoke_test(base, data):
     assert password.encode() not in secret
     assert json.loads(Fernet((data / 'vault.key').read_bytes()).decrypt(secret))['password'] == password
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(channel='chromium')
+        browser = None
+        for channel in manager_channels():
+            try:
+                browser = pw.chromium.launch(channel=channel)
+                break
+            except Exception:
+                continue
+        assert browser is not None, 'No system Edge/Chrome found'
         page = browser.new_page()
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))

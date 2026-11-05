@@ -56,7 +56,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--out', type=Path, default=ROOT / 'release')
     parser.add_argument('--skip-browser-payload', action='store_true', help='Developer iteration only; not a distributable release')
+    parser.add_argument('--bundle-browser', action='store_true', help='Embed Chromium (adds ~200 MB); by default the system Edge/Chrome is used')
     args = parser.parse_args()
+    args.skip_browser_payload = args.skip_browser_payload or not args.bundle_browser
     out = args.out.resolve(); out.mkdir(parents=True, exist_ok=True)
     stage = out / 'stage'
     if stage.exists():
