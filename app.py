@@ -113,6 +113,10 @@ lab = LocalSimulationServer(lab_breaker)
 os.chmod(DATA / 'lab.sqlite3', 0o600)
 
 
+class BrowserMissing(RuntimeError):
+    pass
+
+
 def browser_channels():
     """System browsers first (nothing is bundled): Edge exists on every Windows, Chrome on macOS."""
     return ['msedge', 'chrome', 'chromium'] if sys.platform == 'win32' else ['chrome', 'msedge', 'chromium']
@@ -180,7 +184,7 @@ class Runner:
                 return self.browser
             except BrowserError as error:
                 last = error
-        raise RuntimeError('Microsoft Edge yoki Google Chrome topilmadi. Birini o‘rnating.') from last
+        raise BrowserMissing('Microsoft Edge yoki Google Chrome topilmadi. Birini o‘rnating.') from last
 
     async def run(self, headed=False, account_id=None):
         async with self.lock:
@@ -287,7 +291,7 @@ class Runner:
                 kind = type(error).__name__
                 loop = type(asyncio.get_running_loop()).__name__
                 detail = f'{kind}/{loop}'
-                if isinstance(error, RuntimeError) and error.args:
+                if isinstance(error, BrowserMissing):
                     detail += ' ' + str(error.args[0])
                 if isinstance(error, OSError):
                     detail += f' winerror={getattr(error, "winerror", None)} errno={error.errno} {error.strerror or ""}'.rstrip()
