@@ -243,8 +243,8 @@ def smoke_test(base, data):
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.route('**/*', lambda route: route.continue_() if route.request.url.startswith(base + '/') else route.abort())
         page.goto(base)
-        page.get_by_role('heading', name='offline-synthetic', exact=True).wait_for()
-        page.get_by_role('button', name='Tahrirlash', exact=True).click()
+        page.get_by_text('offline-synthetic', exact=True).wait_for()
+        page.get_by_title('Tahrirlash').click()
         page.locator('#editor').wait_for(state='visible')
         assert page.locator('#password').input_value() == password
         page.locator('#toggle-password').click()
