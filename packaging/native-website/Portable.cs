@@ -125,12 +125,24 @@ namespace EMaktabWebsite {
             if(!ReadFully(file,blob)) return null;
             byte[] digest; using(var sha=SHA256.Create()) digest=sha.ComputeHash(blob);
             for(int i=0;i<32;i++) if(digest[i]!=footer[16+i]) return null;
+            return FromBlob(blob);
+        }
+        static Trailer FromBlob(byte[] blob) {
             try {
                 using(var zip=new ZipArchive(new MemoryStream(blob),ZipArchiveMode.Read)) {
                     var meta=Json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(Entry(zip,"meta.json")));
                     return new Trailer {Blob=blob,Meta=new TrailerMeta {SavedAt=Text(meta["savedAt"]),Digest=Text(meta["digest"]),Accounts=Convert.ToInt32(meta["accounts"])}};
                 }
             } catch(Exception) { return null; }
+        }
+        // eMaktab-akkauntlar.emk next to the exe: the same blob as a plain file, so a ready pack can be sent around.
+        string Sidecar { get { string folder=Path.GetDirectoryName(exe); return string.IsNullOrEmpty(folder) ? null : Path.Combine(folder,"eMaktab-akkauntlar.emk"); } }
+        public Trailer ReadSidecar() {
+            string path=Sidecar; if(path==null || !File.Exists(path)) return null;
+            for(int attempt=0;attempt<6;attempt++) {
+                try { return FromBlob(File.ReadAllBytes(path)); } catch(IOException) { Thread.Sleep(500); }
+            }
+            return null;
         }
         public Trailer ReadTrailer() {
             if(!File.Exists(exe)) return null;
@@ -176,9 +188,14 @@ namespace EMaktabWebsite {
 
         // Called before the backend starts. Restores or merges the accounts stored inside this exe.
         public void Prepare(Action<string> status) {
-            Trailer trailer=ReadTrailer();
-            if(trailer==null || trailer.Meta==null) return;
             Directory.CreateDirectory(work);
+            Trailer inside=ReadTrailer(), beside=ReadSidecar();
+            bool hasInside=inside!=null && inside.Meta!=null, hasBeside=beside!=null && beside.Meta!=null;
+            if(hasInside) Apply(inside,status);
+            if(hasBeside && (!hasInside || beside.Meta.Digest!=inside.Meta.Digest)) Apply(beside,status);
+        }
+
+        void Apply(Trailer trailer,Action<string> status) {
             bool liveExists=File.Exists(db) && File.Exists(key);
             DataState live=liveExists ? Inspect(db) : new DataState();
             if(liveExists && live.Digest==trailer.Meta.Digest) { WriteSync(live.Digest); return; }
@@ -276,8 +293,10 @@ namespace EMaktabWebsite {
             if(sql.LastExit!=0 || !File.Exists(snapshot)) { Log("snapshot failed"); return; }
             DataState state=Inspect(snapshot);
             if(state.Accounts==0) return;
-            Trailer current=ReadTrailer();
-            if(current!=null && current.Meta!=null && current.Meta.Digest==state.Digest) { WriteSync(state.Digest); return; }
+            Trailer current=ReadTrailer(), beside=ReadSidecar();
+            bool insideCurrent=current!=null && current.Meta!=null && current.Meta.Digest==state.Digest;
+            bool besideCurrent=beside!=null && beside.Meta!=null && beside.Meta.Digest==state.Digest;
+            if(insideCurrent && besideCurrent) { WriteSync(state.Digest); return; }
             sql.Run(snapshot,work,"DELETE FROM logs;\nDELETE FROM browser_sessions;\nUPDATE settings SET enabled=0;\nVACUUM;");
             var memory=new MemoryStream();
             using(var zip=new ZipArchive(memory,ZipArchiveMode.Create,true)) {
@@ -286,13 +305,20 @@ namespace EMaktabWebsite {
                 var meta=new Dictionary<string,object> {{"savedAt",DateTime.UtcNow.ToString("o")},{"digest",state.Digest},{"accounts",state.Accounts},{"app","1.2.0"}};
                 Add(zip,"meta.json",new UTF8Encoding(false).GetBytes(Json.Serialize(meta)));
             }
-            if(current!=null) KeepPreviousTrailer(current);
-            string pending=Path.Combine(data,"pending-save.emk");
-            WriteAtomic(pending,memory.ToArray());
-            var info=new ProcessStartInfo(saverPath,"\""+exe+"\" \""+pending+"\" "+Process.GetCurrentProcess().Id) {UseShellExecute=false,CreateNoWindow=true};
-            Process.Start(info);
+            byte[] blob=memory.ToArray();
+            if(!insideCurrent) {
+                if(current!=null) KeepPreviousTrailer(current);
+                string pending=Path.Combine(data,"pending-save.emk");
+                WriteAtomic(pending,blob);
+                var info=new ProcessStartInfo(saverPath,"\""+exe+"\" \""+pending+"\" "+Process.GetCurrentProcess().Id) {UseShellExecute=false,CreateNoWindow=true};
+                Process.Start(info);
+                Log("queued save of "+state.Accounts+" accounts into exe");
+            }
+            if(!besideCurrent && Sidecar!=null) {
+                try { if(beside!=null) KeepPreviousTrailer(beside); WriteAtomic(Sidecar,blob); Log("wrote pack file "+Sidecar); }
+                catch(Exception error) { Log("pack file not written: "+error.GetType().Name); }
+            }
             WriteSync(state.Digest);
-            Log("queued save of "+state.Accounts+" accounts into exe");
             try { File.Delete(snapshot); } catch { }
         }
 
