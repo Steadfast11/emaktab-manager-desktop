@@ -204,3 +204,102 @@ def test_browser_start_failure_reports_safe_code_without_secret():
         assert 'NotImplementedError/' in account['detail']
         assert 'fixture-secret' not in account['detail']
     asyncio.run(check())
+
+
+CABINET_STATE = {'cookies': [{'name': 'sid', 'value': 'ok', 'domain': 'emaktab.uz', 'path': '/', 'expires': -1,
+                              'httpOnly': True, 'secure': True, 'sameSite': 'Lax'}], 'origins': []}
+
+
+def cabinet_browser(browser, public=False):
+    """emaktab.uz is a cabinet WITHOUT any logout link: only cookie sid=ok may open it, others go to the login page."""
+    class Shim:
+        def on(self, event, callback):
+            browser.on(event, callback)
+
+        async def new_context(self, **kwargs):
+            context = await browser.new_context(**kwargs)
+
+            async def cabinet(route):
+                if public or 'sid=ok' in route.request.headers.get('cookie', ''):
+                    await route.fulfill(body='<p>Mening kabinetim</p>', content_type='text/html')
+                else:
+                    await route.fulfill(status=302, headers={'location': 'https://login.emaktab.uz/'})
+
+            async def login(route):
+                await route.fulfill(body='<input name="password">', content_type='text/html')
+            await context.route('https://emaktab.uz/**', cabinet)
+            await context.route('https://login.emaktab.uz/**', login)
+            return context
+
+        async def close(self):
+            await browser.close()
+    return Shim()
+
+
+def test_session_proof_is_real_even_without_a_visible_logout_link():
+    async def check():
+        pw = await m.async_playwright().start()
+        browser = await pw.chromium.launch()
+        real_sleep = asyncio.sleep
+
+        async def quick(seconds):
+            await real_sleep(0)
+        try:
+            with patch.object(m.asyncio, 'sleep', quick):
+                r = m.Runner()
+                r.browser = cabinet_browser(browser)
+                assert (await r.session_proof(CABINET_STATE, 'https://emaktab.uz/cabinet?token=secret'))[0] is True
+                wrong = {**CABINET_STATE, 'cookies': [{**CABINET_STATE['cookies'][0], 'value': 'wrong'}]}
+                ok, why = await r.session_proof(wrong, 'https://emaktab.uz/cabinet')
+                assert not ok and 'kabinetni ochmadi' in why and 'token' not in why
+                r.browser = cabinet_browser(browser, public=True)
+                ok, why = await r.session_proof(CABINET_STATE, 'https://emaktab.uz/cabinet')
+                assert not ok and 'kirishsiz ham ochiladi' in why
+        finally:
+            await browser.close()
+            await pw.stop()
+    asyncio.run(check())
+
+
+def test_saved_session_is_reused_without_captcha_or_password(monkeypatch, tmp_path):
+    clear()
+    from resilience import CircuitBreaker
+    monkeypatch.setattr(m, 'breaker', CircuitBreaker(tmp_path / 'reuse-breaker'))
+    with m.connect() as c:
+        c.execute('INSERT INTO accounts(id,label,secret) VALUES(?,?,?)', ('reuse2', 'fixture', m.VAULT.encrypt(json.dumps({'login': 'never-typed', 'password': 'never-typed'}).encode())))
+    # The login page keeps showing its form (it does not leave by itself) and the cabinet has no logout link.
+    m.sessions.save('reuse2', {**CABINET_STATE, '_home': 'https://emaktab.uz/cabinet'})
+
+    async def scenario():
+        pw = await m.async_playwright().start()
+        browser = await pw.chromium.launch()
+        shim = cabinet_browser(browser)
+
+        class Chromium:
+            async def launch(self, **kwargs):
+                return shim
+
+        class Runtime:
+            chromium = Chromium()
+
+            async def stop(self):
+                pass
+
+        class Starter:
+            async def start(self):
+                return Runtime()
+        monkeypatch.setattr(m, 'async_playwright', lambda: Starter())
+        real_sleep = asyncio.sleep
+
+        async def quick(seconds):
+            await real_sleep(0)
+        monkeypatch.setattr(m.asyncio, 'sleep', quick)
+        try:
+            await m.Runner().run(False)
+        finally:
+            await pw.stop()
+    asyncio.run(scenario())
+    account = next(a for a in m.public_accounts() if a['id'] == 'reuse2')
+    assert account['status'] == 'success', account
+    stored = m.sessions.load('reuse2')
+    assert stored['_home'] == 'https://emaktab.uz/cabinet'

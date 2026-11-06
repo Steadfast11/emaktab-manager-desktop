@@ -94,10 +94,29 @@ async def visible(page, selector):
     return False
 
 
+LOGIN_HOST = urlparse(LOGIN_URL).hostname or ''
+
+
+def emaktab_host(host):
+    return host == 'emaktab.uz' or host.endswith('.emaktab.uz')
+
+
+def clean_url(url):
+    parts = urlparse(url)
+    return f'{parts.scheme}://{parts.netloc}{parts.path}'
+
+
 async def authenticated(page):
     # Cookies or a redirect alone do not prove authentication. Fail closed.
     host = urlparse(page.url).hostname or ''
-    return (host == 'emaktab.uz' or host.endswith('.emaktab.uz')) and not await visible(page, 'input[name="password"]') and await visible(page, LOGOUT)
+    return emaktab_host(host) and not await visible(page, 'input[name="password"]') and await visible(page, LOGOUT)
+
+
+async def in_cabinet(page):
+    # A hint only, never proof: an eMaktab page that is not the login host and shows no login form or challenge.
+    # The logout link may sit inside a menu, so it cannot be required. Proof is Runner.session_proof().
+    host = urlparse(page.url).hostname or ''
+    return emaktab_host(host) and host != LOGIN_HOST and not await visible(page, 'input[name="password"]') and not await visible(page, CHALLENGE)
 
 
 with connect() as c:
@@ -206,6 +225,7 @@ class Runner:
                     submitted = False
                     try:
                         saved = None if breaker.status()['state'] == 'HALF_OPEN' else sessions.load(aid)
+                        home = saved.pop('_home', None) if saved else None
                         kwargs = {'storage_state': saved} if saved else {}
                         context = await self.browser.new_context(locale='uz-UZ', timezone_id='Asia/Samarkand', **kwargs)
                         self.contexts.append(context)
@@ -221,7 +241,12 @@ class Runner:
                         initial = await page_detection(page, rate)
                         if initial.outcome == Outcome.RATE_LIMIT:
                             halt_cycle(aid, initial)
-                        if initial.outcome != Outcome.SUCCESS:
+                        reused = False
+                        if initial.outcome != Outcome.SUCCESS and saved:
+                            reused = await self.reuse_session(page, saved, home)
+                            if not reused and home:
+                                await page.goto(LOGIN_URL, wait_until='domcontentloaded', timeout=30000)
+                        if initial.outcome != Outcome.SUCCESS and not reused:
                             sessions.delete(aid)
                             if await visible(page, CHALLENGE):
                                 ok = await self.wait_manual(page, aid, headed, rate)
@@ -236,6 +261,7 @@ class Runner:
                                 submitted = True
                                 await page.locator('[data-test-id="login-button"]').click()
                                 ok = False
+                                seen = 0
                                 for _ in range(30):
                                     detection = await page_detection(page, rate)
                                     if detection.outcome == Outcome.RATE_LIMIT:
@@ -249,6 +275,13 @@ class Runner:
                                         if breaker.status()['state'] in ('PAUSED_RATE_LIMIT','PAUSED_REVIEW'):
                                             raise StopCycle()
                                         break
+                                    if await in_cabinet(page):
+                                        seen += 1
+                                        if seen == 3 and (await self.session_proof(await context.storage_state(), page.url))[0]:
+                                            ok = True
+                                            break
+                                    else:
+                                        seen = 0
                                     if await visible(page, CHALLENGE):
                                         ok = await self.wait_manual(page, aid, headed, rate)
                                         break
@@ -256,7 +289,10 @@ class Runner:
                         else:
                             ok = True
                         if ok:
-                            sessions.save(aid, await context.storage_state())
+                            state = await context.storage_state()
+                            host = urlparse(page.url).hostname or ''
+                            home_url = clean_url(page.url) if emaktab_host(host) and host != LOGIN_HOST else home
+                            sessions.save(aid, {**state, '_home': home_url} if home_url else state)
                             breaker.success()
                             update(aid, 'success', 'Kirish tasdiqlandi; brauzer sessiyasi shifrlab saqlandi')
                         elif next(a['status'] for a in public_accounts() if a['id'] == aid) != 'failed':
@@ -311,11 +347,55 @@ class Runner:
                 breaker.rejected()
                 await self.close()
 
+    async def session_proof(self, state, url):
+        """Real proof of a reusable login: the saved state opens `url` inside the cabinet,
+        while a clean browser (no cookies) is sent away to the login page."""
+        url = clean_url(url)
+
+        async def probe(storage):
+            kwargs = {'storage_state': storage} if storage else {}
+            context = await self.browser.new_context(locale='uz-UZ', timezone_id='Asia/Samarkand', **kwargs)
+            self.contexts.append(context)
+            try:
+                page = await context.new_page()
+                page.set_default_timeout(15000)
+                await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                await asyncio.sleep(3)  # let client-side redirects to the login page happen
+                return await in_cabinet(page), page.url
+            finally:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+                if context in self.contexts:
+                    self.contexts.remove(context)
+
+        inside, final = await probe(state)
+        if not inside:
+            return False, 'saqlangan sessiya kabinetni ochmadi (' + clean_url(final) + ')'
+        open_anyway, _ = await probe(None)
+        if open_anyway:
+            return False, 'sahifa kirishsiz ham ochiladi, isbot bo‘lmadi (' + url + ')'
+        return True, ''
+
+    async def reuse_session(self, page, saved, home):
+        """Is the saved session still valid? Decided by real proof, not by a logout link that may be hidden."""
+        try:
+            if home:
+                await page.goto(home, wait_until='domcontentloaded', timeout=30000)
+                await asyncio.sleep(3)
+            if await authenticated(page):
+                return True
+            return await in_cabinet(page) and (await self.session_proof(saved, page.url))[0]
+        except Exception:
+            return False
+
     async def wait_manual(self, page, aid, headed, rate=None):
         if not headed:
             update(aid, 'waiting', 'CAPTCHA/2FA yoki qo‘lda kirish kerak. Brauzer oynasi rejimida qayta ishga tushiring')
             return False
         update(aid, 'waiting', 'Brauzer oynasida CAPTCHA/2FA yoki kirishni bajaring. 120 soniya kutiladi')
+        stable, reason = 0, ''
         for _ in range(120):
             check = await page_detection(page, rate)
             if check.outcome == Outcome.RATE_LIMIT:
@@ -323,8 +403,18 @@ class Runner:
             if await authenticated(page):
                 update(aid, 'success', 'Qo‘lda kirishdan so‘ng akkaunt holati tasdiqlandi')
                 return True
+            if await in_cabinet(page):
+                stable += 1
+                if stable >= 3:
+                    proven, reason = await self.session_proof(await page.context.storage_state(), page.url)
+                    if proven:
+                        update(aid, 'success', 'Qo‘lda kirishdan so‘ng sessiya haqiqiy tekshiruvdan o‘tdi')
+                        return True
+                    stable = -30
+            else:
+                stable = 0
             await asyncio.sleep(1)
-        update(aid, 'unverified', 'Qo‘lda tasdiqlash vaqti tugadi. Keyingi akkaunt davom etadi')
+        update(aid, 'unverified', 'Qo‘lda tasdiqlash vaqti tugadi. ' + (reason or 'Kabinet sahifasi topilmadi (' + clean_url(page.url) + ')'))
         return False
 
     def start(self, headed, mode='web', account_id=None):
