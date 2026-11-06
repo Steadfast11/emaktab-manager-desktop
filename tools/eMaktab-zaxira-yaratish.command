@@ -1,155 +1,189 @@
 #!/bin/bash
 # eMaktab Manager: hozirgi akkauntlardan zaxira yaratadi -> Desktop/eMaktab-zaxira.command
+# Hech narsa o'rnatilmaydi: faqat macOS'dagi tayyor perl, sqlite3 va openssl ishlatiladi.
 # Zaxira faylni bossangiz, o'chib ketgan akkauntlar qayta kiritiladi (borlariga tegmaydi).
 # DIQQAT: zaxira faylda loginlar VA parollar bor. Uni begonalarga bermang.
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "python3 topilmadi. Terminalda 'xcode-select --install' ni ishga tushiring va qayta urinib ko'ring."
-  exit 1
-fi
-python3 -I - <<'GEN_END'
-import base64, hashlib, hmac, json, os, sqlite3, subprocess, sys, time
-from pathlib import Path
+/usr/bin/perl - <<'GEN_END'
+use strict; use warnings;
+use MIME::Base64 qw(encode_base64 decode_base64);
+use Digest::SHA qw(hmac_sha256);
+use JSON::PP;
+use File::Temp qw(tempfile);
+use POSIX qw(strftime);
 
-data = Path(os.environ.get('EMAKTAB_DATA_DIR') or Path.home() / 'Library/Application Support/eMaktab Manager')
-out_dir = Path(os.environ.get('EMAKTAB_OUT_DIR') or Path.home() / 'Desktop')
-db, keyfile = data / 'manager.sqlite3', data / 'vault.key'
-if not db.is_file() or not keyfile.is_file():
-    print(f"Ma'lumotlar topilmadi: {data}")
-    sys.exit(1)
+my $home   = $ENV{HOME};
+my $data   = $ENV{EMAKTAB_DATA_DIR} || "$home/Library/Application Support/eMaktab Manager";
+my $outdir = $ENV{EMAKTAB_OUT_DIR}  || "$home/Desktop";
+my ($db, $keyfile) = ("$data/manager.sqlite3", "$data/vault.key");
+die "Ma'lumotlar topilmadi: $data\n" unless -f $db && -f $keyfile;
 
-raw = base64.urlsafe_b64decode(keyfile.read_bytes().strip())
-sign_key, enc_key = raw[:16], raw[16:]
+sub slurp { my $f = shift; open my $h, '<', $f or die "$f: $!\n"; binmode $h; local $/; my $d = <$h>; close $h; $d }
+sub b64u_dec { my $s = shift; $s =~ s/\s+//g; $s =~ tr{-_}{+/}; decode_base64($s) }
+sub hx { my $s = pack('H*', shift); utf8::decode($s); $s }
 
-def decrypt(token):
-    blob = base64.urlsafe_b64decode(token)
-    if blob[0] != 0x80 or not hmac.compare_digest(hmac.new(sign_key, blob[:-32], hashlib.sha256).digest(), blob[-32:]):
-        raise ValueError('kalit mos kelmadi')
-    r = subprocess.run(['openssl', 'enc', '-aes-128-cbc', '-d', '-K', enc_key.hex(), '-iv', blob[9:25].hex()],
-                       input=blob[25:-32], capture_output=True)
-    if r.returncode:
-        raise ValueError("shifrni ochib bo'lmadi")
-    return json.loads(r.stdout)
+my $raw = b64u_dec(slurp($keyfile));
+die "vault.key noto'g'ri\n" unless length($raw) == 32;
+my ($sign, $enc) = (substr($raw, 0, 16), substr($raw, 16));
 
-con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
-groups = dict(con.execute('SELECT id,name FROM account_groups'))
-accounts, bad = [], 0
-for label, secret, gid in con.execute('SELECT label,secret,group_id FROM accounts ORDER BY rowid'):
-    try:
-        cred = decrypt(bytes(secret))
-        accounts.append({'group': groups.get(gid, 'Asosiy'), 'label': label, 'login': cred['login'], 'password': cred['password']})
-    except Exception:
-        bad += 1
-if not accounts:
-    print("Zaxiralash uchun ochiladigan akkaunt yo'q" + (f' ({bad} tasi ochilmadi)' if bad else '') + '.')
-    sys.exit(1)
+sub aes_decrypt {
+    my ($iv, $bytes) = @_;
+    my ($fh, $tmp) = tempfile(UNLINK => 1); binmode $fh; print $fh $bytes; close $fh;
+    open my $p, '-|', 'openssl', 'enc', '-d', '-aes-128-cbc', '-K', unpack('H*', $enc), '-iv', unpack('H*', $iv), '-in', $tmp
+        or die "openssl ishlamadi\n";
+    binmode $p; local $/; my $o = <$p>; close $p or die "shifrni ochib bo'lmadi\n"; $o
+}
+sub fernet_decrypt {
+    my $b = b64u_dec(shift);
+    die "format xato\n" if length($b) < 57 || ord($b) != 0x80;
+    die "kalit mos kelmadi\n" unless hmac_sha256(substr($b, 0, -32), $sign) eq substr($b, -32);
+    decode_json(aes_decrypt(substr($b, 9, 16), substr($b, 25, length($b) - 57)))
+}
 
-licence = (data / 'license.key').read_text().strip() if (data / 'license.key').is_file() else ''
-payload = {'created': time.strftime('%Y-%m-%d %H:%M'), 'groups': list(dict.fromkeys(a['group'] for a in accounts)), 'accounts': accounts, 'license': licence}
-blob = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
+open my $q, '-|', 'sqlite3', '-readonly', $db,
+    "SELECT hex(IFNULL(g.name,'Asosiy')), hex(a.label), CAST(a.secret AS TEXT) FROM accounts a LEFT JOIN account_groups g ON g.id=a.group_id ORDER BY a.rowid"
+    or die "sqlite3 ishlamadi\n";
+my @rows = <$q>; close $q; chomp @rows;
 
-TEMPLATE = r"""#!/bin/bash
+my (@accounts, $bad);
+$bad = 0;
+for my $r (@rows) {
+    my ($g, $l, $tok) = split /\|/, $r, 3;
+    my $c = eval { fernet_decrypt($tok) };
+    if ($c) { push @accounts, { group => hx($g), label => hx($l), login => $c->{login}, password => $c->{password} } }
+    else    { $bad++ }
+}
+unless (@accounts) { print "Zaxiralash uchun ochiladigan akkaunt yo'q" . ($bad ? " ($bad tasi ochilmadi)" : '') . ".\n"; exit 1 }
+
+my $licence = -f "$data/license.key" ? slurp("$data/license.key") : '';
+$licence =~ s/\s+//g;
+my %seen; my @groups = grep { !$seen{$_}++ } map { $_->{group} } @accounts;
+my $created = strftime('%Y-%m-%d %H:%M', localtime);
+my $blob = encode_base64(JSON::PP->new->utf8->canonical->encode({ created => $created, groups => \@groups, accounts => \@accounts, license => $licence }), '');
+
+my $template = <<'TPL';
+#!/bin/bash
 # eMaktab Manager zaxirasi (@@COUNT@@ ta akkaunt, @@DATE@@). Bosilganda o'chib ketgan akkauntlarni qayta kiritadi.
-# Bor akkauntlarga tegmaydi. Ichida parollar bor: begonalarga bermang.
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "python3 topilmadi. Terminalda 'xcode-select --install' ni ishga tushiring va qayta urinib ko'ring."
-  read -r -p "Enter bosing..." _; exit 1
-fi
-python3 -I - <<'PY'
-import base64, hashlib, hmac, json, os, secrets, sqlite3, subprocess, sys, time
-from pathlib import Path
+# Hech narsa o'rnatilmaydi. Bor akkauntlarga tegmaydi. Ichida parollar bor: begonalarga bermang.
+/usr/bin/perl - <<'PL'
+use strict; use warnings;
+use MIME::Base64 qw(encode_base64 decode_base64);
+use Digest::SHA qw(hmac_sha256);
+use JSON::PP;
+use File::Temp qw(tempfile);
+use File::Path qw(make_path);
+use Fcntl qw(O_WRONLY O_CREAT O_EXCL);
+use POSIX qw(strftime);
 
-PAYLOAD = json.loads(base64.b64decode('@@BLOB@@').decode())
-data = Path(os.environ.get('EMAKTAB_DATA_DIR') or Path.home() / 'Library/Application Support/eMaktab Manager')
-data.mkdir(parents=True, exist_ok=True)
-os.chmod(data, 0o700)
-db, keyfile = data / 'manager.sqlite3', data / 'vault.key'
+my $P = JSON::PP->new->utf8->decode(decode_base64('@@BLOB@@'));
+my $data = $ENV{EMAKTAB_DATA_DIR} || "$ENV{HOME}/Library/Application Support/eMaktab Manager";
+make_path($data, { mode => 0700 }); chmod 0700, $data;
+my ($db, $keyfile) = ("$data/manager.sqlite3", "$data/vault.key");
 
-if not keyfile.exists():
-    if db.exists():  # kalitsiz eski baza ochilmaydi: o'chirmasdan chetga olamiz
-        db.rename(data / ('manager.sqlite3.eski-' + time.strftime('%Y%m%d-%H%M%S')))
-    fd = os.open(keyfile, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, 'wb') as f:
-        f.write(base64.urlsafe_b64encode(os.urandom(32)))
-raw = base64.urlsafe_b64decode(keyfile.read_bytes().strip())
-sign_key, enc_key = raw[:16], raw[16:]
+sub slurp { my $f = shift; open my $h, '<', $f or die "$f: $!\n"; binmode $h; local $/; my $d = <$h>; close $h; $d }
+sub b64u_dec { my $s = shift; $s =~ s/\s+//g; $s =~ tr{-_}{+/}; decode_base64($s) }
+sub b64u_enc { my $s = encode_base64(shift, ''); $s =~ tr{+/}{-_}; $s }
+sub rand_bytes { my $n = shift; open my $h, '<', '/dev/urandom' or die; binmode $h; read($h, my $b, $n); close $h; $b }
+sub hx { my $s = pack('H*', shift); utf8::decode($s); $s }
+sub hxe { my $s = shift; utf8::encode($s); unpack('H*', $s) }
 
-def openssl(args, payload):
-    r = subprocess.run(['openssl', 'enc', '-aes-128-cbc'] + args, input=payload, capture_output=True)
-    if r.returncode:
-        raise ValueError('openssl xatosi')
-    return r.stdout
+unless (-e $keyfile) {
+    rename $db, "$db.eski-" . strftime('%Y%m%d-%H%M%S', localtime) if -e $db;   # kalitsiz eski baza: o'chirmasdan chetga olinadi
+    sysopen(my $k, $keyfile, O_WRONLY | O_CREAT | O_EXCL, 0600) or die "vault.key yaratilmadi: $!\n";
+    print $k b64u_enc(rand_bytes(32)); close $k;
+}
+my $raw = b64u_dec(slurp($keyfile));
+die "vault.key noto'g'ri\n" unless length($raw) == 32;
+my ($sign, $enc) = (substr($raw, 0, 16), substr($raw, 16));
 
-def encrypt(obj):
-    iv = os.urandom(16)
-    body = b'\x80' + int(time.time()).to_bytes(8, 'big') + iv + openssl(['-e', '-K', enc_key.hex(), '-iv', iv.hex()], json.dumps(obj).encode())
-    return base64.urlsafe_b64encode(body + hmac.new(sign_key, body, hashlib.sha256).digest())
+sub aes {
+    my ($mode, $iv, $bytes) = @_;
+    my ($fh, $tmp) = tempfile(UNLINK => 1); binmode $fh; print $fh $bytes; close $fh;
+    open my $p, '-|', 'openssl', 'enc', $mode, '-aes-128-cbc', '-K', unpack('H*', $enc), '-iv', unpack('H*', $iv), '-in', $tmp
+        or die "openssl ishlamadi\n";
+    binmode $p; local $/; my $o = <$p>; close $p or die "openssl xatosi\n"; $o
+}
+sub fernet_encrypt {
+    my $iv = rand_bytes(16);
+    my $body = "\x80" . pack('Q>', time) . $iv . aes('-e', $iv, JSON::PP->new->utf8->canonical->encode(shift));
+    b64u_enc($body . hmac_sha256($body, $sign))
+}
+sub fernet_decrypt {
+    my $b = b64u_dec(shift);
+    die "format xato\n" if length($b) < 57 || ord($b) != 0x80;
+    die "kalit mos kelmadi\n" unless hmac_sha256(substr($b, 0, -32), $sign) eq substr($b, -32);
+    JSON::PP->new->utf8->decode(aes('-d', substr($b, 9, 16), substr($b, 25, length($b) - 57)))
+}
+sub sql_rows {
+    my $sql = shift;
+    open my $p, '-|', 'sqlite3', $db, $sql or die "sqlite3 ishlamadi\n";
+    my @r = <$p>; close $p; chomp @r; map { [split /\|/, $_, -1] } @r
+}
+sub sql_run {
+    my $sql = shift;
+    open my $p, '|-', 'sqlite3', $db or die "sqlite3 ishlamadi\n";
+    print $p ".timeout 30000\n$sql"; close $p or die "sqlite3 xatosi\n";
+}
 
-def decrypt(token):
-    blob = base64.urlsafe_b64decode(token)
-    if blob[0] != 0x80 or not hmac.compare_digest(hmac.new(sign_key, blob[:-32], hashlib.sha256).digest(), blob[-32:]):
-        raise ValueError('kalit mos kelmadi')
-    return json.loads(openssl(['-d', '-K', enc_key.hex(), '-iv', blob[9:25].hex()], blob[25:-32]))
+sql_run(<<'SQL');
+CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY, label TEXT NOT NULL, secret BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'idle', detail TEXT NOT NULL DEFAULT '', updated TEXT);
+CREATE TABLE IF NOT EXISTS logs(id INTEGER PRIMARY KEY, account_id TEXT, time TEXT, message TEXT);
+CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER DEFAULT 0, time TEXT DEFAULT '07:00', last_date TEXT DEFAULT '');
+INSERT OR IGNORE INTO settings(id) VALUES(1);
+CREATE TABLE IF NOT EXISTS account_groups(id TEXT PRIMARY KEY, name TEXT NOT NULL);
+INSERT OR IGNORE INTO account_groups(id,name) VALUES('default','Asosiy');
+SQL
+sql_run("ALTER TABLE accounts ADD COLUMN group_id TEXT NOT NULL DEFAULT 'default';\n")
+    unless grep { $_->[1] eq 'group_id' } sql_rows('PRAGMA table_info(accounts)');
+sql_run("ALTER TABLE settings ADD COLUMN mode TEXT NOT NULL DEFAULT 'web';\n")
+    unless grep { $_->[1] eq 'mode' } sql_rows('PRAGMA table_info(settings)');
+chmod 0600, $db;
 
-con = sqlite3.connect(db, timeout=30)
-con.executescript('''CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY, label TEXT NOT NULL, secret BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'idle', detail TEXT NOT NULL DEFAULT '', updated TEXT);
-    CREATE TABLE IF NOT EXISTS logs(id INTEGER PRIMARY KEY, account_id TEXT, time TEXT, message TEXT);
-    CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER DEFAULT 0, time TEXT DEFAULT '07:00', last_date TEXT DEFAULT '');
-    INSERT OR IGNORE INTO settings(id) VALUES(1);
-    CREATE TABLE IF NOT EXISTS account_groups(id TEXT PRIMARY KEY, name TEXT NOT NULL);
-    INSERT OR IGNORE INTO account_groups(id,name) VALUES('default','Asosiy');''')
-if 'group_id' not in [r[1] for r in con.execute('PRAGMA table_info(accounts)')]:
-    con.execute("ALTER TABLE accounts ADD COLUMN group_id TEXT NOT NULL DEFAULT 'default'")
-if 'mode' not in [r[1] for r in con.execute('PRAGMA table_info(settings)')]:
-    con.execute("ALTER TABLE settings ADD COLUMN mode TEXT NOT NULL DEFAULT 'web'")
-os.chmod(db, 0o600)
+my (%have, $unreadable);
+$unreadable = 0;
+for my $r (sql_rows('SELECT CAST(secret AS TEXT) FROM accounts')) {
+    my $c = eval { fernet_decrypt($r->[0]) };
+    if ($c) { $have{$c->{login}} = 1 } else { $unreadable++ }
+}
+my %gid = map { (hx($_->[1]) => $_->[0]) } sql_rows('SELECT id, hex(name) FROM account_groups');
 
-have, unreadable = set(), 0
-for (secret,) in con.execute('SELECT secret FROM accounts'):
-    try:
-        have.add(decrypt(bytes(secret))['login'])
-    except Exception:
-        unreadable += 1
-group_ids = {name: gid for gid, name in con.execute('SELECT id,name FROM account_groups')}
+my ($added, $skipped, $sql) = (0, 0, "BEGIN;\n");
+for my $a (@{ $P->{accounts} }) {
+    if ($have{$a->{login}}) { $skipped++; next }
+    unless ($gid{$a->{group}}) {
+        $gid{$a->{group}} = unpack('H*', rand_bytes(8));
+        $sql .= "INSERT INTO account_groups(id,name) VALUES('$gid{$a->{group}}',CAST(x'" . hxe($a->{group}) . "' AS TEXT));\n";
+    }
+    my $tok = fernet_encrypt({ login => $a->{login}, password => $a->{password} });
+    $sql .= "INSERT INTO accounts(id,label,secret,group_id) VALUES('" . unpack('H*', rand_bytes(8)) . "',CAST(x'" . hxe($a->{label})
+          . "' AS TEXT),CAST(x'" . unpack('H*', $tok) . "' AS BLOB),'$gid{$a->{group}}');\n";
+    $have{$a->{login}} = 1; $added++;
+}
+sql_run($sql . "COMMIT;\n");
 
-added = skipped = 0
-for a in PAYLOAD['accounts']:
-    if a['login'] in have:
-        skipped += 1
-        continue
-    if a['group'] not in group_ids:
-        group_ids[a['group']] = secrets.token_hex(8)
-        con.execute('INSERT INTO account_groups(id,name) VALUES(?,?)', (group_ids[a['group']], a['group']))
-    con.execute('INSERT INTO accounts(id,label,secret,group_id) VALUES(?,?,?,?)',
-                (secrets.token_hex(8), a['label'], encrypt({'login': a['login'], 'password': a['password']}), group_ids[a['group']]))
-    have.add(a['login'])
-    added += 1
-con.commit()
-con.close()
+my $licence_file = "$data/license.key";
+my $licence_restored = 0;
+if ($P->{license} && !-e $licence_file) {
+    sysopen(my $l, $licence_file, O_WRONLY | O_CREAT | O_EXCL, 0600) or die "license.key yozilmadi: $!\n";
+    print $l $P->{license}; close $l; $licence_restored = 1;
+}
 
-licence_file = data / 'license.key'
-licence_restored = False
-if PAYLOAD.get('license') and not licence_file.exists():
-    fd = os.open(licence_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, 'w') as f:
-        f.write(PAYLOAD['license'])
-    licence_restored = True
-
-print(f"Zaxira: {len(PAYLOAD['accounts'])} ta akkaunt ({PAYLOAD['created']}).")
-print(f"Qayta kiritildi: {added} ta. Allaqachon bor edi: {skipped} ta.")
-if licence_restored:
-    print("Litsenziya qayta tiklandi (u shu kompyuterga bog'langan; boshqa kompyuterda ishlamasligi mumkin).")
-if unreadable:
-    print(f"Diqqat: bazada ochib bo'lmaydigan {unreadable} ta yozuv bor (boshqa kalit bilan saqlangan).")
-print("Ilova ochiq bo'lsa, sahifani yangilang (yoki ilovani qayta oching).")
-PY
+print "Zaxira: " . scalar(@{ $P->{accounts} }) . " ta akkaunt ($P->{created}).\n";
+print "Qayta kiritildi: $added ta. Allaqachon bor edi: $skipped ta.\n";
+print "Litsenziya qayta tiklandi (u shu kompyuterga bog'langan; boshqa kompyuterda ishlamasligi mumkin).\n" if $licence_restored;
+print "Diqqat: bazada ochib bo'lmaydigan $unreadable ta yozuv bor (boshqa kalit bilan saqlangan).\n" if $unreadable;
+print "Ilova ochiq bo'lsa, sahifani yangilang (yoki ilovani qayta oching).\n";
+PL
 read -r -p "Enter bosing..." _
-"""
+TPL
 
-target = out_dir / 'eMaktab-zaxira.command'
-text = TEMPLATE.replace('@@COUNT@@', str(len(accounts))).replace('@@DATE@@', payload['created']).replace('@@BLOB@@', blob)
-target.write_text(text, encoding='utf-8')
-target.chmod(0o700)
-print(f'Zaxira tayyor: {target}')
-print(f'Akkauntlar: {len(accounts)} ta, guruhlar: {len(payload["groups"])} ta' + (f', ochilmaganlari (zaxiraga kirmadi): {bad}' if bad else ''))
-print("Ichida parollar va litsenziya bor: faylni begona odamga bermang.")
+my $n = scalar @accounts;
+$template =~ s/\@\@COUNT\@\@/$n/g;
+$template =~ s/\@\@DATE\@\@/$created/g;
+$template =~ s/\@\@BLOB\@\@/$blob/g;
+my $target = "$outdir/eMaktab-zaxira.command";
+open my $o, '>', $target or die "$target: $!\n"; binmode $o; print $o $template; close $o;
+chmod 0700, $target;
+print "Zaxira tayyor: $target\n";
+print "Akkauntlar: $n ta, guruhlar: " . scalar(@groups) . " ta" . ($bad ? ", ochilmaganlari (zaxiraga kirmadi): $bad" : '') . "\n";
+print "Ichida parollar va litsenziya bor: faylni begona odamga bermang.\n";
 GEN_END
