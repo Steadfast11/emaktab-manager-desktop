@@ -68,15 +68,63 @@ with connect() as c:
 os.chmod(DB, 0o600)
 
 
+_LOGINS = {}
+
+
+def login_of(aid, secret):
+    """Decrypting every account on every poll is what made old computers crawl: remember the login per unchanged secret."""
+    hit = _LOGINS.get(aid)
+    if hit and hit[0] == secret:
+        return hit[1]
+    login = json.loads(VAULT.decrypt(secret))['login']
+    _LOGINS[aid] = (secret, login)
+    return login
+
+
 def public_accounts():
     with connect() as c:
         rows = list(c.execute('SELECT id,label,secret,status,detail,updated,group_id FROM accounts ORDER BY rowid'))
-        result = []
-        for row in rows:
-            account = dict(row)
-            account['login'] = json.loads(VAULT.decrypt(account.pop('secret')))['login']
-            result.append(account)
-        return result
+    result = []
+    for row in rows:
+        account = dict(row)
+        account['login'] = login_of(account['id'], account.pop('secret'))
+        result.append(account)
+    return result
+
+
+def account_count():
+    with connect() as c:
+        return c.execute('SELECT count(*) FROM accounts').fetchone()[0]
+
+
+def account_status(aid):
+    with connect() as c:
+        row = c.execute('SELECT status FROM accounts WHERE id=?', (aid,)).fetchone()
+    return row[0] if row else None
+
+
+REJECTED_DETAIL = 'Login/parol rad etildi'
+
+
+def retry_ids():
+    """Accounts worth another try: unproven/failed/stopped ones. A rejected password is never resent."""
+    with connect() as c:
+        return [r[0] for r in c.execute(
+            "SELECT id FROM accounts WHERE status IN ('failed','unverified','interrupted','cancelled') AND detail NOT LIKE ? ORDER BY rowid",
+            (REJECTED_DETAIL + '%',))]
+
+
+def queue_accounts(account_id=None, only=None):
+    stamp = now()
+    with connect() as c:
+        if only is not None:
+            ids = list(only)
+        else:
+            ids = [r[0] for r in c.execute('SELECT id FROM accounts WHERE id=? ORDER BY rowid', (account_id,))] if account_id else [r[0] for r in c.execute('SELECT id FROM accounts ORDER BY rowid')]
+        for aid in ids:
+            c.execute("UPDATE accounts SET status='queued',detail=?,updated=? WHERE id=?", ('Navbatda: brauzer sessiyasi tekshiriladi', stamp, aid))
+            c.execute('INSERT INTO logs(account_id,time,message) VALUES(?,?,?)', (aid, stamp, 'Navbatda: brauzer sessiyasi tekshiriladi'))
+        c.execute('DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 300)')
 
 
 def update(aid, status, detail):
@@ -86,12 +134,52 @@ def update(aid, status, detail):
         c.execute('DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 300)')
 
 
+_VISIBLE = '''(s) => { for (const e of document.querySelectorAll(s)) { const r = e.getBoundingClientRect(); if (r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden') return true; } return false; }'''
+_PROBE = '''([logout, challenge]) => { const v = (s) => { for (const e of document.querySelectorAll(s)) { const r = e.getBoundingClientRect(); if (r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden') return true; } return false; };
+  return {password: v('input[name="password"]'), logout: v(logout), challenge: v(challenge), text: document.body ? document.body.innerText : ''}; }'''
+
+
+async def evaluate_retry(page, script, arg, default):
+    # One browser round trip instead of many; a page that is navigating right now is retried briefly.
+    for _ in range(3):
+        try:
+            return await page.evaluate(script, arg)
+        except BrowserError:
+            await asyncio.sleep(.2)
+    return default
+
+
 async def visible(page, selector):
-    loc = page.locator(selector)
-    for i in range(await loc.count()):
-        if await loc.nth(i).is_visible():
-            return True
-    return False
+    return bool(await evaluate_retry(page, _VISIBLE, selector, False))
+
+
+async def page_probe(page):
+    return await evaluate_retry(page, _PROBE, [LOGOUT, CHALLENGE], {'password': False, 'logout': False, 'challenge': False, 'text': ''})
+
+
+def light_router(block_images):
+    """Fonts and media are never needed to log in; images only when no person has to see a captcha."""
+    heavy = {'font', 'media'} | ({'image'} if block_images else set())
+
+    async def handler(route):
+        if route.request.resource_type in heavy:
+            await route.abort()
+        else:
+            await route.fallback()
+    return handler
+
+
+async def settle(page, quiet=5, limit=15):
+    """Wait until the address stops changing (about 1 s) instead of a fixed 3 s pause."""
+    last, stable = page.url, 0
+    for _ in range(limit):
+        await asyncio.sleep(.2)
+        if page.url != last:
+            last, stable = page.url, 0
+        else:
+            stable += 1
+            if stable >= quiet:
+                return
 
 
 LOGIN_HOST = urlparse(LOGIN_URL).hostname or ''
@@ -109,14 +197,20 @@ def clean_url(url):
 async def authenticated(page):
     # Cookies or a redirect alone do not prove authentication. Fail closed.
     host = urlparse(page.url).hostname or ''
-    return emaktab_host(host) and not await visible(page, 'input[name="password"]') and await visible(page, LOGOUT)
+    if not emaktab_host(host):
+        return False
+    seen = await page_probe(page)
+    return not seen['password'] and seen['logout']
 
 
 async def in_cabinet(page):
     # A hint only, never proof: an eMaktab page that is not the login host and shows no login form or challenge.
     # The logout link may sit inside a menu, so it cannot be required. Proof is Runner.session_proof().
     host = urlparse(page.url).hostname or ''
-    return emaktab_host(host) and host != LOGIN_HOST and not await visible(page, 'input[name="password"]') and not await visible(page, CHALLENGE)
+    if not emaktab_host(host) or host == LOGIN_HOST:
+        return False
+    seen = await page_probe(page)
+    return not seen['password'] and not seen['challenge']
 
 
 with connect() as c:
@@ -136,6 +230,9 @@ class BrowserMissing(RuntimeError):
     pass
 
 
+LIGHT_ARGS = ['--disable-extensions', '--disable-background-networking', '--disable-sync', '--disable-default-apps', '--disable-component-update', '--mute-audio', '--no-first-run', '--no-default-browser-check']
+
+
 def browser_channels():
     """System browsers first (nothing is bundled): Edge exists on every Windows, Chrome on macOS."""
     return ['msedge', 'chrome', 'chromium'] if sys.platform == 'win32' else ['chrome', 'msedge', 'chromium']
@@ -143,6 +240,10 @@ def browser_channels():
 
 class StopCycle(Exception):
     pass
+
+
+class SkipAccount(Exception):
+    """This account failed and its status is already written: go on with the next one."""
 
 
 def halt_cycle(aid, detection):
@@ -165,8 +266,10 @@ def halt_cycle(aid, detection):
 async def page_detection(page, rate_response=None):
     if rate_response and rate_response[0]:
         return rate_response[0]
-    text = await page.locator('body').inner_text(timeout=3000)
-    return RateLimitDetector.classify_ui([text], authenticated=await authenticated(page), login_form=await visible(page, 'input[name="password"]'))
+    seen = await page_probe(page)
+    host = urlparse(page.url).hostname or ''
+    proven = emaktab_host(host) and not seen['password'] and seen['logout']
+    return RateLimitDetector.classify_ui([seen['text']], authenticated=proven, login_form=seen['password'])
 
 
 class Runner:
@@ -177,6 +280,7 @@ class Runner:
         self.pw = None
         self.contexts = []
         self.current = None
+        self._public = (None, {})
 
     async def close(self):
         browser, pw = self.browser, self.pw
@@ -199,24 +303,24 @@ class Runner:
         last = None
         for channel in browser_channels():
             try:
-                self.browser = await self.pw.chromium.launch(headless=not headed, channel=channel)
+                self.browser = await self.pw.chromium.launch(headless=not headed, channel=channel, args=LIGHT_ARGS + ([] if headed else ['--disable-gpu']))
                 return self.browser
             except BrowserError as error:
                 last = error
         raise BrowserMissing('Microsoft Edge yoki Google Chrome topilmadi. Birini o‘rnating.') from last
 
-    async def run(self, headed=False, account_id=None):
+    async def run(self, headed=False, account_id=None, retry=False):
         async with self.lock:
             try:
-                for a in public_accounts():
-                    if account_id and a['id'] != account_id:
-                        continue
-                    update(a['id'], 'queued', 'Navbatda: brauzer sessiyasi tekshiriladi')
+                only = retry_ids() if retry else None
+                queue_accounts(account_id, only)
                 await self.start_browser(headed)
                 active_browser = self.browser
                 active_browser.on('disconnected', lambda: self.browser_disconnected(active_browser))
                 with connect() as c:
                     rows = list(c.execute('SELECT * FROM accounts WHERE id=? ORDER BY rowid', (account_id,))) if account_id else list(c.execute('SELECT * FROM accounts ORDER BY rowid'))
+                if only is not None:
+                    rows = [r for r in rows if r['id'] in only]
                 for row in rows:
                     aid = row['id']
                     self.current = aid
@@ -229,6 +333,7 @@ class Runner:
                         kwargs = {'storage_state': saved} if saved else {}
                         context = await self.browser.new_context(locale='uz-UZ', timezone_id='Asia/Samarkand', **kwargs)
                         self.contexts.append(context)
+                        await context.route('**/*', light_router(not headed))
                         page = await context.new_page()
                         page.set_default_timeout(15000)
                         rate = [None]
@@ -237,16 +342,17 @@ class Runner:
                             if response.status == 429 and (host == 'emaktab.uz' or host.endswith('.emaktab.uz')):
                                 rate[0] = RateLimitDetector.classify_http(429, response.headers)
                         page.on('response', response_seen)
-                        await page.goto(LOGIN_URL, wait_until='domcontentloaded', timeout=30000)
-                        initial = await page_detection(page, rate)
-                        if initial.outcome == Outcome.RATE_LIMIT:
-                            halt_cycle(aid, initial)
-                        reused = False
-                        if initial.outcome != Outcome.SUCCESS and saved:
-                            reused = await self.reuse_session(page, saved, home)
-                            if not reused and home:
-                                await page.goto(LOGIN_URL, wait_until='domcontentloaded', timeout=30000)
-                        if initial.outcome != Outcome.SUCCESS and not reused:
+                        # A saved session goes straight to the cabinet: no login page load, fewer requests to the site.
+                        reused = bool(saved and home) and await self.reuse_session(page, saved, home)
+                        initial = None
+                        if not reused:
+                            await page.goto(LOGIN_URL, wait_until='domcontentloaded', timeout=30000)
+                            initial = await page_detection(page, rate)
+                            if initial.outcome == Outcome.RATE_LIMIT:
+                                halt_cycle(aid, initial)
+                            if initial.outcome != Outcome.SUCCESS and saved and not home:
+                                reused = await self.reuse_session(page, saved, home)
+                        if not reused and initial.outcome != Outcome.SUCCESS:
                             sessions.delete(aid)
                             if await visible(page, CHALLENGE):
                                 ok = await self.wait_manual(page, aid, headed, rate)
@@ -257,7 +363,8 @@ class Runner:
                                 matches = (await page.locator('input[name="login"]').input_value() == credential['login'] and await page.locator('input[name="password"]').input_value() == credential['password'])
                                 del credential
                                 if not matches:
-                                    halt_cycle(aid, RateLimitDetector.classify_ui([]))
+                                    update(aid, 'failed', 'Login/parolni maydonga kiritib bo‘lmadi; akkaunt o‘tkazildi')
+                                    raise SkipAccount()
                                 submitted = True
                                 await page.locator('[data-test-id="login-button"]').click()
                                 ok = False
@@ -295,8 +402,11 @@ class Runner:
                             sessions.save(aid, {**state, '_home': home_url} if home_url else state)
                             breaker.success()
                             update(aid, 'success', 'Kirish tasdiqlandi; brauzer sessiyasi shifrlab saqlandi')
-                        elif next(a['status'] for a in public_accounts() if a['id'] == aid) != 'failed':
-                            halt_cycle(aid, RateLimitDetector.classify_ui([]))
+                        elif account_status(aid) in ('running', 'queued'):
+                            # No proof either way: record it, never retry the password, go on with the next account.
+                            update(aid, 'unverified', 'Natija noma’lum: parol qayta yuborilmadi, keyingi akkauntga o‘tildi')
+                    except SkipAccount:
+                        pass
                     except StopCycle:
                         raise
                     except asyncio.CancelledError:
@@ -304,8 +414,9 @@ class Runner:
                         raise
                     except Exception:
                         if submitted:
-                            halt_cycle(aid, RateLimitDetector.classify_ui([]))
-                        update(aid, 'failed', 'Mahalliy brauzer/tarmoq xatosi; login qayta yuborilmadi')
+                            update(aid, 'unverified', 'Kirish yuborildi, natija noma’lum (xato); parol qayta yuborilmadi, keyingi akkauntga o‘tildi')
+                        else:
+                            update(aid, 'failed', 'Mahalliy brauzer/tarmoq xatosi; login qayta yuborilmadi, keyingi akkauntga o‘tildi')
                         breaker.rejected()
                         if breaker.status()['state'] in ('PAUSED_RATE_LIMIT','PAUSED_REVIEW'):
                             raise StopCycle()
@@ -360,7 +471,7 @@ class Runner:
                 page = await context.new_page()
                 page.set_default_timeout(15000)
                 await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                await asyncio.sleep(3)  # let client-side redirects to the login page happen
+                await settle(page)  # let client-side redirects to the login page happen
                 return await in_cabinet(page), page.url
             finally:
                 try:
@@ -373,7 +484,13 @@ class Runner:
         inside, final = await probe(state)
         if not inside:
             return False, 'saqlangan sessiya kabinetni ochmadi (' + clean_url(final) + ')'
-        open_anyway, _ = await probe(None)
+        # Whether a page opens without any cookies does not depend on the account: ask once per page per browser.
+        if self._public[0] is not self.browser:
+            self._public = (self.browser, {})
+        cache = self._public[1]
+        if url not in cache:
+            cache[url] = (await probe(None))[0]
+        open_anyway = cache[url]
         if open_anyway:
             return False, 'sahifa kirishsiz ham ochiladi, isbot bo‘lmadi (' + url + ')'
         return True, ''
@@ -383,7 +500,7 @@ class Runner:
         try:
             if home:
                 await page.goto(home, wait_until='domcontentloaded', timeout=30000)
-                await asyncio.sleep(3)
+                await settle(page)
             if await authenticated(page):
                 return True
             return await in_cabinet(page) and (await self.session_proof(saved, page.url))[0]
@@ -417,12 +534,12 @@ class Runner:
         update(aid, 'unverified', 'Qo‘lda tasdiqlash vaqti tugadi. ' + (reason or 'Kabinet sahifasi topilmadi (' + clean_url(page.url) + ')'))
         return False
 
-    def start(self, headed, mode='web', account_id=None):
+    def start(self, headed, mode='web', account_id=None, retry=False):
         if self.task and not self.task.done():
             raise HTTPException(409, 'Ish allaqachon davom etmoqda')
         if mode != 'web':
             raise HTTPException(422, 'Faqat sayt rejimi mavjud')
-        self.task = asyncio.create_task(self.run(headed, account_id))
+        self.task = asyncio.create_task(self.run(headed, account_id, retry))
 
 
 runner = Runner()
@@ -434,7 +551,7 @@ async def scheduler():
             s = dict(c.execute('SELECT * FROM settings WHERE id=1').fetchone())
         dt = datetime.now(TZ)
         licensed = getattr(app.state, 'license_check', lambda: True)()
-        if licensed and s['enabled'] and dt.strftime('%H:%M') == s['time'] and s['last_date'] != dt.date().isoformat() and public_accounts():
+        if licensed and s['enabled'] and dt.strftime('%H:%M') == s['time'] and s['last_date'] != dt.date().isoformat() and account_count():
             if not runner.task or runner.task.done():
                 breaker.clear()
                 with connect() as c:
@@ -493,6 +610,7 @@ class Run(BaseModel):
     account_id: str | None = None
     headed: bool = False
     mode: Literal['web'] = 'web'
+    retry: bool = False
 
 
 class Schedule(BaseModel):
@@ -608,7 +726,12 @@ async def run(options: Run):
         raise HTTPException(400, 'Avval akkaunt qo‘shing')
     if options.account_id and not any(a['id'] == options.account_id for a in public_accounts()):
         raise HTTPException(404, 'Akkaunt topilmadi')
-    runner.start(options.headed, options.mode, options.account_id)
+    if options.retry and not retry_ids():
+        raise HTTPException(400, 'Qayta urinadigan akkaunt yo‘q')
+    if options.retry:
+        runner.start(options.headed, options.mode, options.account_id, True)
+    else:
+        runner.start(options.headed, options.mode, options.account_id)
     return {'ok': True}
 
 

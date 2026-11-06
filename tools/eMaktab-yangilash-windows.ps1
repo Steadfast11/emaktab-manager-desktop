@@ -6,9 +6,23 @@
 $ErrorActionPreference = 'Stop'
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
-    $version = '1.2.3'
-    $url = 'https://github.com/Steadfast11/emaktab-manager-desktop/releases/download/v1.2.3/eMaktab.exe'
-    $expected = '8c2a158021f6923ca7038d7d10c4179153156e70355d9fc3e8303108349ba7ca'
+    # Eng yangi relizni GitHub'dan o'zi topadi (eMaktab.exe va eMaktab.exe.sha256 bor bo'lgani)
+    $api = if ($env:EMAKTAB_RELEASES_URL) { $env:EMAKTAB_RELEASES_URL } else { 'https://api.github.com/repos/Steadfast11/emaktab-manager-desktop/releases?per_page=30' }
+    try { $releases = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'eMaktab-updater' } -UseBasicParsing }
+    catch { throw "GitHub'ga ulanib bo'lmadi. Internetni tekshiring. Hech narsa o'zgarmadi." }
+    $release = $null
+    foreach ($r in @($releases)) {
+        if ($r.draft) { continue }
+        $names = @($r.assets | ForEach-Object { $_.name })
+        if (($names -contains 'eMaktab.exe') -and ($names -contains 'eMaktab.exe.sha256')) { $release = $r; break }
+    }
+    if (-not $release) { throw "Reliz topilmadi (eMaktab.exe). Hech narsa o'zgarmadi." }
+    $version = ($release.tag_name -replace '^v', '')
+    $url = ($release.assets | Where-Object { $_.name -eq 'eMaktab.exe' } | Select-Object -First 1).browser_download_url
+    $shaUrl = ($release.assets | Where-Object { $_.name -eq 'eMaktab.exe.sha256' } | Select-Object -First 1).browser_download_url
+    try { $expected = (((New-Object Net.WebClient).DownloadString($shaUrl)).Trim() -split '\s+')[0].ToLower() }
+    catch { throw "SHA256 faylini olib bo'lmadi. Hech narsa o'zgarmadi." }
+    if ($expected -notmatch '^[0-9a-f]{64}$') { throw "SHA256 fayli noto'g'ri. Hech narsa o'zgarmadi." }
     $dataDir = if ($env:EMAKTAB_DATA_DIR) { $env:EMAKTAB_DATA_DIR } else { Join-Path $env:LOCALAPPDATA 'eMaktabManager' }
     $defaultDir = if ($env:EMAKTAB_APP_DIR) { $env:EMAKTAB_APP_DIR } else { Join-Path $env:LOCALAPPDATA 'eMaktab' }
 

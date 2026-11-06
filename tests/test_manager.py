@@ -303,3 +303,92 @@ def test_saved_session_is_reused_without_captcha_or_password(monkeypatch, tmp_pa
     assert account['status'] == 'success', account
     stored = m.sessions.load('reuse2')
     assert stored['_home'] == 'https://emaktab.uz/cabinet'
+
+
+def test_unproven_login_is_skipped_and_the_cycle_goes_on(monkeypatch, tmp_path):
+    """One account that never shows proof must not stop the others (password is sent once, never repeated)."""
+    clear()
+    from resilience import CircuitBreaker
+    monkeypatch.setattr(m, 'breaker', CircuitBreaker(tmp_path / 'skip-breaker'))
+    with m.connect() as c:
+        for i in range(3):
+            c.execute('INSERT INTO accounts(id,label,secret) VALUES(?,?,?)', (f'skip{i}', f'fixture{i}', m.VAULT.encrypt(json.dumps({'login': f'l{i}', 'password': f'p{i}'}).encode())))
+    sent = []
+
+    async def scenario():
+        pw = await m.async_playwright().start()
+        browser = await pw.chromium.launch()
+
+        class Shim:
+            def on(self, event, callback):
+                browser.on(event, callback)
+
+            async def new_context(self, **kwargs):
+                context = await browser.new_context(**kwargs)
+
+                async def login(route):
+                    if route.request.method == 'POST':
+                        sent.append(1)
+                    await route.fulfill(body='<input name="login"><input name="password"><button data-test-id="login-button">Kirish</button>', content_type='text/html')
+                await context.route('https://login.emaktab.uz/**', login)
+                return context
+
+            async def close(self):
+                await browser.close()
+
+        class Chromium:
+            async def launch(self, **kwargs):
+                return Shim()
+
+        class Runtime:
+            chromium = Chromium()
+
+            async def stop(self):
+                pass
+
+        class Starter:
+            async def start(self):
+                return Runtime()
+        monkeypatch.setattr(m, 'async_playwright', lambda: Starter())
+        real_sleep = asyncio.sleep
+
+        async def quick(seconds):
+            await real_sleep(0)
+        monkeypatch.setattr(m.asyncio, 'sleep', quick)
+        try:
+            await m.Runner().run(False)
+        finally:
+            await pw.stop()
+    asyncio.run(scenario())
+    states = {a['id']: a['status'] for a in m.public_accounts()}
+    assert states == {'skip0': 'unverified', 'skip1': 'unverified', 'skip2': 'unverified'}, states
+
+
+def test_account_logins_are_decrypted_once_per_secret(monkeypatch):
+    clear()
+    with m.connect() as c:
+        for i in range(40):
+            c.execute('INSERT INTO accounts(id,label,secret) VALUES(?,?,?)', (f'speed{i}', f'f{i}', m.VAULT.encrypt(json.dumps({'login': f'l{i}', 'password': 'x'}).encode())))
+    m._LOGINS.clear()
+    real = m.VAULT.decrypt
+    calls = []
+    monkeypatch.setattr(m.VAULT, 'decrypt', lambda token: calls.append(1) or real(token))
+    for _ in range(5):
+        assert [a['login'] for a in m.public_accounts()][:2] == ['l0', 'l1']
+    assert len(calls) == 40
+
+
+def test_retry_picks_only_safe_accounts_and_never_a_rejected_password():
+    clear()
+    rows = [('ok', 'success', 'Kirish tasdiqlandi'), ('unv', 'unverified', 'Natija noma’lum'), ('bad', 'failed', 'Login/parol rad etildi; akkaunt o‘tkazildi'),
+            ('net', 'failed', 'Mahalliy brauzer/tarmoq xatosi'), ('man', 'waiting', 'Qo‘lda kirish'), ('stp', 'cancelled', 'Foydalanuvchi ishni to‘xtatdi')]
+    with m.connect() as c:
+        for aid, status, detail in rows:
+            c.execute('INSERT INTO accounts(id,label,secret,status,detail) VALUES(?,?,?,?,?)', (aid, aid, m.VAULT.encrypt(b'{"login":"l","password":"p"}'), status, detail))
+    ids = m.retry_ids()
+    assert ids == ['unv', 'net', 'stp']
+    m.queue_accounts(None, ids)
+    with m.connect() as c:
+        status = dict(c.execute('SELECT id,status FROM accounts').fetchall())
+    assert [k for k, v in status.items() if v == 'queued'] == ['unv', 'net', 'stp']
+    assert status['bad'] == 'failed' and status['ok'] == 'success' and status['man'] == 'waiting'

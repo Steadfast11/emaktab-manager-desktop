@@ -361,6 +361,26 @@ def show_error(message):
         print(message, file=sys.stderr)
 
 
+def describe_error(error):
+    """Short non-private code (type, OS codes, source file:line) and a full traceback in the data folder."""
+    import traceback
+    parts = [type(error).__name__]
+    for name in ('winerror', 'errno'):
+        value = getattr(error, name, None)
+        if value is not None:
+            parts.append(f'{name}={value}')
+    try:
+        last = traceback.extract_tb(error.__traceback__)[-1]
+        parts.append(f'{Path(last.filename).name}:{last.lineno}')
+    except (IndexError, TypeError):
+        pass
+    with contextlib.suppress(Exception):
+        folder = user_data_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / 'startup-error.log').write_text(''.join(traceback.format_exception(error)), encoding='utf-8')
+    return ' '.join(parts)
+
+
 def main():
     parser = argparse.ArgumentParser(description=PRODUCT)
     parser.add_argument('--no-browser', action='store_true', help='Run without opening a window')
@@ -380,7 +400,8 @@ def main():
             traceback.print_exc()
             print(json.dumps({'ok': False, 'error_type': type(error).__name__}), flush=True)
         else:
-            show_error('Ilova ishga tushmadi. Diskda joy va ma’lumotlar papkasiga yozish huquqini tekshiring. Akkauntlar o‘chirilmagan.')
+            code = describe_error(error)
+            show_error('Ilova ishga tushmadi [' + code + ']. Shu kodni dastur egasiga yuboring. Akkauntlar o‘chirilmagan.')
         return 1
 
 

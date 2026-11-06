@@ -1,6 +1,7 @@
 const $=id=>document.getElementById(id);
 const names={idle:'Tayyor',queued:'Navbatda',running:'Kirilmoqda',success:'Tasdiqlandi',failed:'Xato',waiting:'Qo‘lda kirish',unverified:'Tasdiqlanmadi',cancelled:'To‘xtatildi',interrupted:'Uzilgan',rate_limited:'Limit',skipped:'O‘tkazildi'};
 const ATTENTION=['failed','unverified','rate_limited','interrupted','waiting'];
+const RETRYABLE=['failed','unverified','interrupted','cancelled'];
 let groups=[{id:'default',name:'Asosiy'}], activeGroup=null, editing=null, editingGroup=null;
 let closing=false, running=false, accountSig='', groupSig='', logSig='', lastAccounts=[];
 
@@ -66,6 +67,8 @@ async function refresh(){
     $('count-attention').textContent=s.accounts.filter(a=>ATTENTION.includes(a.status)).length;
     $('count-left').textContent=s.accounts.filter(a=>a.status==='queued'||a.status==='running').length;
     $('run').disabled=s.running||!s.accounts.length;$('run').textContent=s.running?'Tekshirilmoqda…':'▶ Barchasiga kirish';
+    const again=s.accounts.filter(a=>RETRYABLE.includes(a.status)&&!(a.detail||'').startsWith('Login/parol rad etildi')).length;
+    $('retry').disabled=s.running||!again;$('retry').textContent='↻ Xatolarni qayta urinish'+(again?' ('+again+')':'');
     $('stop').disabled=!s.running;
     for(const id of ['add','bulk','add-group'])$(id).disabled=s.running;
     syncButtons();
@@ -131,6 +134,7 @@ $('bulk-form').onsubmit=async e=>{
 
 /* ---------- boshqaruv ---------- */
 $('run').onclick=()=>action(()=>api('run','POST',{headed:$('headed').checked}));
+$('retry').onclick=()=>action(()=>api('run','POST',{headed:$('headed').checked,retry:true}));
 $('stop').onclick=()=>action(()=>api('stop','POST',{}));
 $('schedule').onsubmit=e=>{e.preventDefault();action(()=>api('schedule','PUT',{enabled:$('enabled').checked,time:$('time').value}));};
 $('account-search').addEventListener('input',filterAccounts);
@@ -142,4 +146,5 @@ function desktopControls(state){
     try{await api('desktop/quit','POST',{});closing=true;b.disabled=true;b.textContent='Dastur yopildi';$('connection').textContent='Yopildi: oynani yopishingiz mumkin';$('run').disabled=true;}catch(err){say(err.message,true);}};
   document.querySelector('.bar-actions').prepend(b);
 }
-refresh();setInterval(()=>{if(!document.hidden)refresh();},2000);
+/* Ish ketayotganda 2 s, bo‘sh turganda 6 s: eski kompyuterlarda keraksiz yuklanish bo‘lmasin. */
+(async function poll(){if(!document.hidden)await refresh();setTimeout(poll,running?2000:6000);})();
