@@ -63,7 +63,38 @@ my $blob = encode_base64(JSON::PP->new->utf8->canonical->encode({ created => $cr
 my $template = <<'TPL';
 #!/bin/bash
 # eMaktab Manager zaxirasi (@@COUNT@@ ta akkaunt, @@DATE@@). Bosilganda o'chib ketgan akkauntlarni qayta kiritadi.
-# Hech narsa o'rnatilmaydi. Bor akkauntlarga tegmaydi. Ichida parollar bor: begonalarga bermang.
+# Ilova yo'q bo'lsa uni GitHub'dan yuklab ~/Applications ga o'rnatadi (69 MB), keyin akkauntlarni tiklaydi.
+# Bor akkauntlarga tegmaydi. Ichida parollar bor: begonalarga bermang.
+APPNAME="eMaktab Manager.app"
+APPURL="https://github.com/Steadfast11/emaktab-manager-desktop/releases/download/v1.2.2/eMaktab-Manager-macOS-arm64.zip"
+APPSHA="075db3e67e73537005ff271aa2af53dd96cbf5295b212970a5b9d9bbb1f0d5dd"
+INSTALL_DIR="${EMAKTAB_INSTALL_DIR:-$HOME/Applications}"
+FOUNDAPP=""
+for base in "$INSTALL_DIR" "$HOME/Applications" "/Applications" "$HOME/Desktop" "$HOME/Downloads" "$HOME/Documents"; do
+  if [ -d "$base/$APPNAME" ]; then FOUNDAPP="$base/$APPNAME"; break; fi
+done
+if [ -z "$FOUNDAPP" ]; then
+  if [ "$(uname -m)" != "arm64" ]; then
+    echo "Bu Mac Intel chipli: ilova faqat Apple chipli Mac'lar uchun. Akkauntlar baribir tiklanadi."
+  else
+    echo "Ilova topilmadi. Yuklanmoqda (69 MB), biroz kuting..."
+    TMP="$(mktemp -d)"
+    if curl -fL --progress-bar -o "$TMP/app.zip" "$APPURL" \
+       && [ "$(shasum -a 256 "$TMP/app.zip" | cut -d' ' -f1)" = "$APPSHA" ] \
+       && ditto -x -k "$TMP/app.zip" "$TMP/new" \
+       && codesign --verify --deep --strict "$TMP/new/$APPNAME" 2>/dev/null; then
+      mkdir -p "$INSTALL_DIR"
+      if ditto "$TMP/new/$APPNAME" "$INSTALL_DIR/$APPNAME"; then
+        xattr -dr com.apple.quarantine "$INSTALL_DIR/$APPNAME" 2>/dev/null
+        FOUNDAPP="$INSTALL_DIR/$APPNAME"
+        echo "Ilova o'rnatildi: $FOUNDAPP"
+      fi
+    else
+      echo "Ilovani yuklab o'rnatib bo'lmadi (internetni tekshiring). Akkauntlar baribir tiklanadi."
+    fi
+    rm -rf "$TMP"
+  fi
+fi
 /usr/bin/perl - <<'PL'
 use strict; use warnings;
 use MIME::Base64 qw(encode_base64 decode_base64);
@@ -173,6 +204,7 @@ print "Litsenziya qayta tiklandi (u shu kompyuterga bog'langan; boshqa kompyuter
 print "Diqqat: bazada ochib bo'lmaydigan $unreadable ta yozuv bor (boshqa kalit bilan saqlangan).\n" if $unreadable;
 print "Ilova ochiq bo'lsa, sahifani yangilang (yoki ilovani qayta oching).\n";
 PL
+if [ -n "$FOUNDAPP" ] && [ -z "$EMAKTAB_NO_OPEN" ]; then open "$FOUNDAPP"; fi
 read -r -p "Enter bosing..." _
 TPL
 
