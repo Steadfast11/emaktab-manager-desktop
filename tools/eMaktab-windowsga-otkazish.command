@@ -20,6 +20,8 @@ sqlite3 "$DATA/manager.sqlite3" ".backup '$W/manager.sqlite3'" || fail "Bazadan 
 COUNT="$(sqlite3 "$W/manager.sqlite3" 'SELECT count(*) FROM accounts;')"
 [ "${COUNT:-0}" -gt 0 ] || fail "O'tkazish uchun akkaunt yo'q."
 
+# Bo'sh bo'limlar (akkauntsiz) Windows'ga o'tkazilmaydi
+sqlite3 "$W/manager.sqlite3" "DELETE FROM account_groups WHERE id!='default' AND id NOT IN (SELECT group_id FROM accounts);" || fail "Bo'limlarni tozalab bo'lmadi."
 # Ilovaning o'zi hisoblaydigan belgi (digest) bilan bir xil formula
 DIGEST="$( { sqlite3 "$W/manager.sqlite3" "SELECT 'A|'||id||'|'||label||'|'||hex(secret)||'|'||group_id FROM accounts ORDER BY id;"
              sqlite3 "$W/manager.sqlite3" "SELECT 'G|'||id||'|'||name FROM account_groups ORDER BY id;"; } | shasum -a 256 | cut -d' ' -f1)"
