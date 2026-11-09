@@ -392,3 +392,149 @@ def test_retry_picks_only_safe_accounts_and_never_a_rejected_password():
         status = dict(c.execute('SELECT id,status FROM accounts').fetchall())
     assert [k for k, v in status.items() if v == 'queued'] == ['unv', 'net', 'stp']
     assert status['bad'] == 'failed' and status['ok'] == 'success' and status['man'] == 'waiting'
+
+
+def _add_accounts(n, prefix):
+    with m.connect() as c:
+        for i in range(n):
+            c.execute('INSERT INTO accounts(id,label,secret) VALUES(?,?,?)', (f'{prefix}{i}', f'fixture{i}', m.VAULT.encrypt(json.dumps({'login': f'l{i}', 'password': f'p{i}'}).encode())))
+
+
+def _fake_playwright(monkeypatch, scripts, launched):
+    """A browser stand-in: each account's goto() runs the next script (hang, crash, error)."""
+    class Page:
+        url = 'about:blank'
+
+        def __init__(self, script):
+            self.script = script
+
+        def set_default_timeout(self, t):
+            pass
+
+        def on(self, *a):
+            pass
+
+        async def goto(self, *a, **k):
+            await self.script()
+
+    class Context:
+        def __init__(self, script):
+            self.script = script
+
+        async def route(self, *a, **k):
+            pass
+
+        async def new_page(self):
+            return Page(self.script)
+
+        async def close(self):
+            pass
+
+    class Browser:
+        def __init__(self):
+            self.callback = None
+
+        def on(self, event, callback):
+            self.callback = callback
+
+        async def new_context(self, **kwargs):
+            return Context(scripts.pop(0)(self))
+
+        async def close(self):
+            pass
+
+    class Chromium:
+        async def launch(self, **kwargs):
+            b = Browser()
+            launched.append(b)
+            return b
+
+    class Runtime:
+        chromium = Chromium()
+
+        async def stop(self):
+            pass
+
+    class Starter:
+        async def start(self):
+            return Runtime()
+    monkeypatch.setattr(m, 'async_playwright', lambda: Starter())
+
+
+def test_hanging_account_times_out_and_the_cycle_goes_on(monkeypatch, tmp_path):
+    clear()
+    from resilience import CircuitBreaker
+    monkeypatch.setattr(m, 'breaker', CircuitBreaker(tmp_path / 'hang-breaker'))
+    monkeypatch.setattr(m, 'ACCOUNT_SECONDS', {False: .3, True: .3})
+    _add_accounts(3, 'hang')
+
+    async def hang():
+        await asyncio.Event().wait()
+
+    async def boom():
+        raise RuntimeError('net::ERR_INTERNET_DISCONNECTED')
+    scripts = [lambda b: hang, lambda b: boom, lambda b: boom]
+    _fake_playwright(monkeypatch, scripts, [])
+    asyncio.run(m.Runner().run(False))
+    states = {a['id']: (a['status'], a['detail']) for a in m.public_accounts()}
+    assert states['hang0'][0] == 'failed' and 'Vaqt tugadi' in states['hang0'][1], states
+    assert states['hang1'][0] == 'failed' and 'ERR_INTERNET_DISCONNECTED' in states['hang1'][1], states
+    assert states['hang2'][0] == 'failed', states
+
+
+def test_browser_crash_loses_only_that_account(monkeypatch, tmp_path):
+    clear()
+    from resilience import CircuitBreaker
+    monkeypatch.setattr(m, 'breaker', CircuitBreaker(tmp_path / 'crash-breaker'))
+    _add_accounts(3, 'crash')
+    launched = []
+
+    async def boom():
+        raise RuntimeError('later')
+
+    def crash(browser):
+        async def go():
+            browser.callback()  # the hidden browser dies in the middle of this account
+            await asyncio.Event().wait()
+        return go
+    scripts = [crash, lambda b: boom, lambda b: boom]
+    _fake_playwright(monkeypatch, scripts, launched)
+
+    async def go():
+        r = m.Runner()
+        r.task = asyncio.create_task(r.run(False))  # as Runner.start() does
+        await r.task
+    asyncio.run(go())
+    states = {a['id']: (a['status'], a['detail']) for a in m.public_accounts()}
+    assert states['crash0'][0] == 'failed' and 'Brauzer kutilmaganda yopildi' in states['crash0'][1], states
+    assert states['crash1'][1].startswith('Mahalliy brauzer/tarmoq xatosi') and states['crash2'][0] == 'failed', states
+    assert len(launched) == 2  # the browser was started again for the remaining accounts
+
+
+def test_run_only_selected_accounts_and_bulk_delete(monkeypatch):
+    clear()
+    _add_accounts(4, 'sel')
+    started = []
+    monkeypatch.setattr(m.runner, 'start', lambda *a, **k: started.append(a))
+    with TestClient(m.app) as c:
+        r = c.post('/api/run', json={'account_ids': ['sel1', 'sel3', 'ghost']}, headers=HEADERS)
+        assert r.status_code == 200 and started[-1][4] == ['sel1', 'sel3'], started
+        assert c.post('/api/run', json={'account_ids': ['ghost']}, headers=HEADERS).status_code == 400
+        assert c.post('/api/accounts/delete', json={'ids': []}, headers=HEADERS).status_code == 422
+        r = c.post('/api/accounts/delete', json={'ids': ['sel0', 'sel2', 'ghost']}, headers=HEADERS)
+        assert r.json() == {'ok': True, 'deleted': 2}
+        assert [a['id'] for a in m.public_accounts()] == ['sel1', 'sel3']
+
+
+def test_selected_ids_limit_the_cycle(monkeypatch, tmp_path):
+    clear()
+    from resilience import CircuitBreaker
+    monkeypatch.setattr(m, 'breaker', CircuitBreaker(tmp_path / 'only-breaker'))
+    _add_accounts(4, 'only')
+
+    async def boom():
+        raise RuntimeError('x')
+    _fake_playwright(monkeypatch, [lambda b: boom, lambda b: boom], [])
+    asyncio.run(m.Runner().run(False, None, False, ['only1', 'only3']))
+    states = {a['id']: a['status'] for a in m.public_accounts()}
+    assert states == {'only0': 'idle', 'only1': 'failed', 'only2': 'idle', 'only3': 'failed'}, states

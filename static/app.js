@@ -3,6 +3,7 @@ const names={idle:'Tayyor',queued:'Navbatda',running:'Kirilmoqda',success:'Tasdi
 const ATTENTION=['failed','unverified','rate_limited','interrupted','waiting'];
 const RETRYABLE=['failed','unverified','interrupted','cancelled'];
 let groups=[{id:'default',name:'Asosiy'}], activeGroup=null, editing=null, editingGroup=null;
+let selected=new Set(), lastPicked=null;
 let closing=false, running=false, accountSig='', groupSig='', logSig='', lastAccounts=[];
 
 async function api(path,method='GET',body){
@@ -28,10 +29,18 @@ function renderGroups(accounts){
 }
 function renderAccounts(accounts,isRunning){
   const box=$('accounts');box.replaceChildren();
-  if(!accounts.length){box.append(el('div','Hozircha akkaunt yo‘q. «＋ Akkaunt» yoki «Ko‘plab qo‘shish» tugmasini bosing.','empty'));return;}
+  if(!accounts.length){box.append(el('div','Hozircha akkaunt yo‘q. «＋ Akkaunt» yoki «Ko‘plab qo‘shish» tugmasini bosing.','empty'));syncSelection();return;}
   accounts.forEach((a,i)=>{
     const row=el('article',null,'account');row.dataset.login=(a.login+' '+a.label).toLowerCase();row.dataset.group=a.group_id||'default';
-    row.append(el('span',String(i+1),'num'));
+    const pick=el('input',null,'pick');pick.type='checkbox';pick.checked=selected.has(a.id);pick.disabled=isRunning;pick.title='Tanlash';pick.setAttribute('aria-label',a.label+' ni tanlash');row.dataset.id=a.id;
+    row.classList.toggle('picked',pick.checked);
+    pick.onclick=ev=>{
+      const rows=[...document.querySelectorAll('.account:not([hidden])')];
+      if(ev.shiftKey&&lastPicked){const ids=rows.map(r=>r.dataset.id),x=ids.indexOf(lastPicked),y=ids.indexOf(a.id);if(x>=0&&y>=0)for(const id of ids.slice(Math.min(x,y),Math.max(x,y)+1))pick.checked?selected.add(id):selected.delete(id);}
+      else pick.checked?selected.add(a.id):selected.delete(a.id);
+      lastPicked=a.id;syncSelection();
+    };
+    row.append(pick,el('span',String(i+1),'num'));
     const who=el('div',null,'who');who.append(el('strong',a.label),el('span',a.login));row.append(who);
     row.append(el('span',groupName(a.group_id||'default'),'gname'));
     const st=el('div',null,'state');st.append(el('span',names[a.status]||a.status,'badge s-'+a.status));if(a.detail)st.append(el('small',a.detail));row.append(st);
@@ -43,12 +52,33 @@ function renderAccounts(accounts,isRunning){
   });
   filterAccounts();
 }
+/* ---------- tanlash ---------- */
+const visibleIds=()=>[...document.querySelectorAll('.account:not([hidden])')].map(r=>r.dataset.id);
+const inScope=()=>lastAccounts.filter(a=>activeGroup===null||(a.group_id||'default')===activeGroup).map(a=>a.id);
+function syncSelection(){
+  const known=new Set(lastAccounts.map(a=>a.id));for(const id of [...selected])if(!known.has(id))selected.delete(id);
+  document.querySelectorAll('.account').forEach(r=>{const on=selected.has(r.dataset.id);r.classList.toggle('picked',on);const c=r.querySelector('.pick');if(c)c.checked=on;});
+  const vis=visibleIds(),n=vis.filter(id=>selected.has(id)).length;
+  const all=$('select-all');all.checked=vis.length>0&&n===vis.length;all.indeterminate=n>0&&n<vis.length;all.disabled=running||!vis.length;
+  const total=selected.size;
+  $('selected-count').textContent=total?'Tanlangan: '+total+' ta':'';
+  const rest=inScope().filter(id=>!selected.has(id)).length;
+  $('sel-run').disabled=running||!total;$('sel-delete').disabled=running||!total;$('sel-invert').disabled=running||!vis.length;
+  $('sel-run-rest').disabled=running||!total||!rest;
+  $('selection').hidden=!lastAccounts.length;
+}
+$('select-all').onchange=e=>{for(const id of visibleIds())e.target.checked?selected.add(id):selected.delete(id);syncSelection();};
+$('sel-invert').onclick=()=>{for(const id of visibleIds())selected.has(id)?selected.delete(id):selected.add(id);syncSelection();};
+$('sel-run').onclick=()=>{const ids=[...selected];if(ids.length&&confirm(ids.length+' ta tanlangan akkauntga kirilsinmi?'))action(()=>api('run','POST',{headed:$('headed').checked,account_ids:ids}));};
+$('sel-run-rest').onclick=()=>{const ids=inScope().filter(id=>!selected.has(id));if(ids.length&&confirm('Tanlanmagan '+ids.length+' ta akkauntga kirilsinmi? (tanlanganlar o‘tkazib yuboriladi)'))action(()=>api('run','POST',{headed:$('headed').checked,account_ids:ids}));};
+$('sel-delete').onclick=()=>{const ids=[...selected];if(ids.length&&confirm(ids.length+' ta tanlangan akkaunt o‘chirilsinmi? Buni qaytarib bo‘lmaydi.'))action(async()=>{await api('accounts/delete','POST',{ids});selected.clear();});};
 function filterAccounts(){
   const q=$('account-search').value.trim().toLowerCase();let visible=0;
   document.querySelectorAll('.account').forEach(r=>{r.hidden=!r.dataset.login.includes(q)||(activeGroup!==null&&r.dataset.group!==activeGroup);if(!r.hidden)visible++;});
   $('search-count').textContent=q?visible+' ta':'';
   const e=$('search-empty');const any=document.querySelectorAll('.account').length>0;
   e.hidden=!any||visible>0;e.textContent=q?'Bunday akkaunt topilmadi.':'Bu bo‘limda akkaunt yo‘q.';
+  syncSelection();
 }
 function syncButtons(){$('rename-group').disabled=running||!activeGroup;}
 

@@ -48,11 +48,18 @@ main{max-width:1100px;margin:0 auto;padding:16px}
 #search-count{position:absolute;right:12px;top:50%;transform:translateY(-50%);color:var(--muted);font-size:13px}
 
 .accounts{margin-top:12px;background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--shadow)}
-.account{display:grid;grid-template-columns:36px minmax(160px,1.4fr) minmax(90px,.7fr) minmax(150px,1.6fr) auto;align-items:center;gap:12px;padding:10px 14px;border-top:1px solid var(--line)}
+.account{display:grid;grid-template-columns:24px 36px minmax(160px,1.4fr) minmax(90px,.7fr) minmax(150px,1.6fr) auto;align-items:center;gap:12px;padding:10px 14px;border-top:1px solid var(--line)}
 .account:first-child{border-top:0}
 .account:hover{background:color-mix(in srgb,var(--soft) 55%,transparent)}
 .account[hidden]{display:none}
 .num{color:var(--muted);font-size:13px;text-align:right}
+.pick{width:20px;min-height:20px;height:20px;padding:0;margin:0;accent-color:var(--accent);cursor:pointer}
+.selection{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:12px;padding:8px 14px;background:var(--card);border:1px solid var(--line);border-radius:12px}
+.selection .check{display:flex;align-items:center;gap:8px;font-weight:600}
+.selection .muted{color:var(--muted);font-size:13.5px}
+.selection[hidden]{display:none}
+.account.picked{background:color-mix(in srgb,var(--soft) 80%,transparent)}
+button.danger:hover:not(:disabled){background:var(--badbg);color:var(--bad)}
 .who{min-width:0;display:flex;flex-direction:column}
 .who strong,.who span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .who span{color:var(--muted);font-size:13.5px}
@@ -101,8 +108,8 @@ dialog textarea{resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,Co
 
 @media (max-width:760px){
   .stats{grid-template-columns:repeat(2,1fr)}
-  .account{grid-template-columns:28px 1fr auto;grid-template-areas:"n who act" ". st st";row-gap:6px}
-  .num{grid-area:n}.who{grid-area:who}.row-actions{grid-area:act}.state{grid-area:st}.gname{display:none}
+  .account{grid-template-columns:24px 28px 1fr auto;grid-template-areas:"p n who act" ". . st st";row-gap:6px}
+  .pick{grid-area:p}.num{grid-area:n}.who{grid-area:who}.row-actions{grid-area:act}.state{grid-area:st}.gname{display:none}
   .lower{grid-template-columns:1fr}
   .bar{padding:10px 14px}
 }

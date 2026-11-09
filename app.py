@@ -238,6 +238,9 @@ def browser_channels():
     return ['msedge', 'chrome', 'chromium'] if sys.platform == 'win32' else ['chrome', 'msedge', 'chromium']
 
 
+ACCOUNT_SECONDS = {False: 150, True: 330}  # most time one account may take (hidden / visible browser)
+
+
 class StopCycle(Exception):
     pass
 
@@ -280,6 +283,8 @@ class Runner:
         self.pw = None
         self.contexts = []
         self.current = None
+        self.interrupt = None
+        self.recover = False
         self._public = (None, {})
 
     async def close(self):
@@ -295,7 +300,21 @@ class Runner:
 
     def browser_disconnected(self, browser):
         if self.browser is browser and self.task and not self.task.done():
+            if self.recover and self.current:
+                # Hidden browser crashed while one account was running: only that account is lost, the cycle goes on.
+                self.interrupt = 'browser'
             self.task.cancel()
+
+    def expire(self, task):
+        # One account hung (site or network not answering): give up on it, never on the whole cycle.
+        if task and not task.done() and self.current:
+            self.interrupt = 'timeout'
+            task.cancel()
+
+    async def open_browser(self, headed):
+        await self.start_browser(headed)
+        active = self.browser
+        active.on('disconnected', lambda: self.browser_disconnected(active))
 
     async def start_browser(self, headed=False):
         await self.close()
@@ -309,14 +328,16 @@ class Runner:
                 last = error
         raise BrowserMissing('Microsoft Edge yoki Google Chrome topilmadi. Birini o‘rnating.') from last
 
-    async def run(self, headed=False, account_id=None, retry=False):
+    async def run(self, headed=False, account_id=None, retry=False, ids=None):
         async with self.lock:
             try:
-                only = retry_ids() if retry else None
+                only = retry_ids() if retry else ids
                 queue_accounts(account_id, only)
-                await self.start_browser(headed)
-                active_browser = self.browser
-                active_browser.on('disconnected', lambda: self.browser_disconnected(active_browser))
+                me = asyncio.current_task()
+                self.recover = not headed
+                restarts = 0
+                budget = ACCOUNT_SECONDS[bool(headed)]
+                await self.open_browser(headed)
                 with connect() as c:
                     rows = list(c.execute('SELECT * FROM accounts WHERE id=? ORDER BY rowid', (account_id,))) if account_id else list(c.execute('SELECT * FROM accounts ORDER BY rowid'))
                 if only is not None:
@@ -324,6 +345,8 @@ class Runner:
                 for row in rows:
                     aid = row['id']
                     self.current = aid
+                    self.interrupt = None
+                    watchdog = asyncio.get_running_loop().call_later(budget, self.expire, me)
                     update(aid, 'running', 'Alohida sessiya tekshirilmoqda')
                     context = None
                     submitted = False
@@ -410,17 +433,38 @@ class Runner:
                     except StopCycle:
                         raise
                     except asyncio.CancelledError:
-                        update(aid, 'cancelled', 'Foydalanuvchi ishni to‘xtatdi')
-                        raise
-                    except Exception:
-                        if submitted:
-                            update(aid, 'unverified', 'Kirish yuborildi, natija noma’lum (xato); parol qayta yuborilmadi, keyingi akkauntga o‘tildi')
+                        reason, self.interrupt = self.interrupt, None
+                        if not reason or me is None or me.cancelling() != 1:
+                            update(aid, 'cancelled', 'Foydalanuvchi ishni to‘xtatdi')
+                            raise
+                        me.uncancel()  # our own interrupt (hang or browser crash), not the user's Stop
+                        if reason == 'timeout':
+                            text = 'Vaqt tugadi (sayt javob bermadi)'
                         else:
-                            update(aid, 'failed', 'Mahalliy brauzer/tarmoq xatosi; login qayta yuborilmadi, keyingi akkauntga o‘tildi')
+                            text = 'Brauzer kutilmaganda yopildi'
+                        if submitted:
+                            update(aid, 'unverified', text + '; kirish yuborilgan, natija noma’lum. Parol qayta yuborilmadi, keyingi akkauntga o‘tildi')
+                        else:
+                            update(aid, 'failed', text + '; login qayta yuborilmadi, keyingi akkauntga o‘tildi')
+                        breaker.rejected()
+                        if breaker.status()['state'] in ('PAUSED_RATE_LIMIT','PAUSED_REVIEW'):
+                            raise StopCycle()
+                        if reason == 'browser':
+                            restarts += 1
+                            if restarts > 3:
+                                raise StopCycle()
+                            await self.open_browser(headed)
+                    except Exception as error:
+                        why = ' '.join(f'{type(error).__name__}: {str(error).splitlines()[0] if str(error) else ""}'.split())[:140]
+                        if submitted:
+                            update(aid, 'unverified', f'Kirish yuborildi, natija noma’lum (xato: {why}); parol qayta yuborilmadi, keyingi akkauntga o‘tildi')
+                        else:
+                            update(aid, 'failed', f'Mahalliy brauzer/tarmoq xatosi ({why}); login qayta yuborilmadi, keyingi akkauntga o‘tildi')
                         breaker.rejected()
                         if breaker.status()['state'] in ('PAUSED_RATE_LIMIT','PAUSED_REVIEW'):
                             raise StopCycle()
                     finally:
+                        watchdog.cancel()
                         if context:
                             try:
                                 await context.close()
@@ -534,12 +578,12 @@ class Runner:
         update(aid, 'unverified', 'Qo‘lda tasdiqlash vaqti tugadi. ' + (reason or 'Kabinet sahifasi topilmadi (' + clean_url(page.url) + ')'))
         return False
 
-    def start(self, headed, mode='web', account_id=None, retry=False):
+    def start(self, headed, mode='web', account_id=None, retry=False, ids=None):
         if self.task and not self.task.done():
             raise HTTPException(409, 'Ish allaqachon davom etmoqda')
         if mode != 'web':
             raise HTTPException(422, 'Faqat sayt rejimi mavjud')
-        self.task = asyncio.create_task(self.run(headed, account_id, retry))
+        self.task = asyncio.create_task(self.run(headed, account_id, retry, ids))
 
 
 runner = Runner()
@@ -611,6 +655,11 @@ class Run(BaseModel):
     headed: bool = False
     mode: Literal['web'] = 'web'
     retry: bool = False
+    account_ids: list[str] | None = Field(default=None, max_length=5000)
+
+
+class Ids(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=5000)
 
 
 class Schedule(BaseModel):
@@ -719,17 +768,41 @@ async def delete(aid: str):
     return {'ok': True}
 
 
+@app.post('/api/accounts/delete')
+async def delete_many(body: Ids):
+    editable()
+    wanted = list(dict.fromkeys(body.ids))
+    with connect() as c:
+        existing = [r[0] for r in c.execute('SELECT id FROM accounts')]
+        known = set(existing)
+        gone = [i for i in wanted if i in known]
+        for aid in gone:
+            c.execute('DELETE FROM accounts WHERE id=?', (aid,))
+            c.execute('DELETE FROM logs WHERE account_id=?', (aid,))
+    for aid in gone:
+        sessions.delete(aid)
+    return {'ok': True, 'deleted': len(gone)}
+
+
 @app.post('/api/run')
 async def run(options: Run):
     breaker.clear()
     if not public_accounts():
         raise HTTPException(400, 'Avval akkaunt qo‘shing')
+    ids = None
+    if options.account_ids is not None:
+        known = {a['id'] for a in public_accounts()}
+        ids = [i for i in dict.fromkeys(options.account_ids) if i in known]
+        if not ids:
+            raise HTTPException(400, 'Tanlangan akkaunt topilmadi')
     if options.account_id and not any(a['id'] == options.account_id for a in public_accounts()):
         raise HTTPException(404, 'Akkaunt topilmadi')
     if options.retry and not retry_ids():
         raise HTTPException(400, 'Qayta urinadigan akkaunt yo‘q')
     if options.retry:
         runner.start(options.headed, options.mode, options.account_id, True)
+    elif ids is not None:
+        runner.start(options.headed, options.mode, options.account_id, False, ids)
     else:
         runner.start(options.headed, options.mode, options.account_id)
     return {'ok': True}
