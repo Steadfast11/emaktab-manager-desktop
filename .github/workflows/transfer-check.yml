@@ -1,0 +1,39 @@
+name: Mac to Windows transfer check
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  transfer:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the generated transfer file (synthetic accounts only)
+        shell: pwsh
+        run: |
+          $app = Join-Path $env:RUNNER_TEMP 'eMaktab-app'
+          $env:EMAKTAB_APP_DIR = $app
+          $env:EMAKTAB_NO_OPEN = '1'
+          Copy-Item tests/fixtures/synthetic-windows-transfer.cmd (Join-Path $env:RUNNER_TEMP 'transfer.cmd')
+          cmd /c "`"$env:RUNNER_TEMP\transfer.cmd`" < NUL"
+          $exe = Join-Path $app 'eMaktab.exe'
+          $pack = Join-Path $app 'eMaktab-akkauntlar.emk'
+          if (-not (Test-Path $exe)) { throw 'eMaktab.exe was not installed' }
+          if (-not (Test-Path $pack)) { throw 'account pack was not placed beside the exe' }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead($pack)
+          $names = @($zip.Entries | ForEach-Object { $_.Name })
+          $zip.Dispose()
+          foreach ($n in 'manager.sqlite3','vault.key','meta.json') { if ($names -notcontains $n) { throw "pack misses $n" } }
+          Write-Output "TRANSFER_INSTALL_AND_PACK_OK ($((Get-Item $exe).Length) bytes)"
+      - name: Second run must be idempotent and keep the app
+        shell: pwsh
+        run: |
+          $app = Join-Path $env:RUNNER_TEMP 'eMaktab-app'
+          $env:EMAKTAB_APP_DIR = $app
+          $env:EMAKTAB_NO_OPEN = '1'
+          $before = (Get-FileHash (Join-Path $app 'eMaktab.exe')).Hash
+          cmd /c "`"$env:RUNNER_TEMP\transfer.cmd`" < NUL"
+          if ((Get-FileHash (Join-Path $app 'eMaktab.exe')).Hash -ne $before) { throw 'exe changed on second run' }
+          Write-Output 'TRANSFER_RERUN_OK'
