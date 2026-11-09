@@ -120,4 +120,4 @@ perl -ne 'exit 1 if /[^\x00-\x7F]/' "$OUT/eMaktab-Windows-akkauntlar.cmd" || fai
 echo "Tayyor: $OUT/eMaktab-Windows-akkauntlar.cmd"
 echo "Akkauntlar: $COUNT ta. Faylni Windows kompyuterga (flesh, Telegram 'Saqlangan xabarlar' yoki o'zingizga email) o'tkazib, ikki marta bosing."
 echo "Ichida parollar bor: faylni begona odamga bermang."
-if [ -z "${EMAKTAB_NO_PAUSE:-}" ]; then read -r -p "Enter bosing..." _ || true; fi
+if [ -z "${EMAKTAB_NO_PAUSE:-}" ] && [ -t 0 ]; then read -r -p "Enter bosing..." _ || true; fi
