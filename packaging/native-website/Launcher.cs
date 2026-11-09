@@ -16,8 +16,8 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("eMaktab")]
 [assembly: AssemblyProduct("eMaktab")]
-[assembly: AssemblyVersion("1.2.4.0")]
-[assembly: AssemblyFileVersion("1.2.4.0")]
+[assembly: AssemblyVersion("1.2.5.0")]
+[assembly: AssemblyFileVersion("1.2.5.0")]
 
 namespace EMaktabWebsite {
     sealed class UserError : Exception {
@@ -96,7 +96,7 @@ namespace EMaktabWebsite {
             using(var dialog=new Form {Text="eMaktab",ClientSize=new Size(490,210),FormBorderStyle=FormBorderStyle.FixedDialog,StartPosition=FormStartPosition.CenterScreen,MaximizeBox=false,MinimizeBox=false}) {
                 var text=new Label {Text=message+"\n\nYordam kodi: "+code,Location=new Point(24,22),Size=new Size(440,125),Font=new Font("Segoe UI",11)};
                 var copy=new Button {Text="Kodni nusxalash",Location=new Point(175,158),Size=new Size(140,32)};
-                copy.Click+=delegate { try { Clipboard.SetText("eMaktab 1.2.4 | "+code); copy.Text="Nusxalandi"; } catch {} };
+                copy.Click+=delegate { try { Clipboard.SetText("eMaktab 1.2.5 | "+code); copy.Text="Nusxalandi"; } catch {} };
                 var close=new Button {Text="Yopish",Location=new Point(328,158),Size=new Size(132,32),DialogResult=DialogResult.OK};
                 dialog.Controls.Add(text);dialog.Controls.Add(copy);dialog.Controls.Add(close);dialog.AcceptButton=close;dialog.CancelButton=close;dialog.ShowDialog(owner);
             }
