@@ -9,13 +9,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Download compiled backend 1.0.3
+      - name: Download compiled backend 1.0.4
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download backend-1.0.3 --repo ${{ github.repository }} --pattern 'eMaktab-Manager-Windows-AMD64.exe' --dir backend
-          if((Get-FileHash backend/eMaktab-Manager-Windows-AMD64.exe -Algorithm SHA256).Hash.ToLower() -ne 'b8220ed4841a2590378b32377c7d98b3f1935ef14b3fc4a405cedd6cfe28669f'){throw 'Backend checksum mismatch'}
+          gh release download backend-1.0.4 --repo ${{ github.repository }} --pattern 'eMaktab-Manager-Windows-AMD64.exe' --dir backend
+          if((Get-FileHash backend/eMaktab-Manager-Windows-AMD64.exe -Algorithm SHA256).Hash.ToLower() -ne '4ccd8e299028ecaae7b031c630203ac8460180a35bf9cb1db799a9257244750b'){throw 'Backend checksum mismatch'}
       - name: Prepare verified tools
         shell: pwsh
         run: |
