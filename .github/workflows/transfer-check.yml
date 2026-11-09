@@ -1,6 +1,11 @@
 name: Mac to Windows transfer check
 on:
   workflow_dispatch:
+  push:
+    branches: [portable-data]
+    paths:
+      - tests/fixtures/synthetic-windows-transfer.cmd
+      - .github/workflows/transfer-check.yml
 permissions:
   contents: read
 jobs:
