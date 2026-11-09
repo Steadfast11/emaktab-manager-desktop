@@ -33,6 +33,7 @@
     <div class="tools-right">
       <button id="add-group" type="button" class="ghost small">＋ Bo‘lim</button>
       <button id="rename-group" type="button" class="ghost small">Nomini o‘zgartirish</button>
+      <button id="delete-groups" type="button" class="ghost small danger">🗑 Bo‘limni o‘chirish</button>
     </div>
   </section>
 
@@ -104,6 +105,16 @@
     <label>Bo‘lim nomi<input id="group-name" maxlength="60" required autocomplete="off" placeholder="Masalan: 1-D sinf"></label>
     <p id="group-error" role="alert"></p>
     <div class="actions"><button type="button" id="group-cancel" class="ghost">Bekor qilish</button><button class="primary">Saqlash</button></div>
+  </form>
+</dialog>
+
+<dialog id="group-delete-editor">
+  <form id="group-delete-form">
+    <h2>Bo‘limlarni o‘chirish</h2>
+    <p class="hint">O‘chiriladigan bo‘limlarni tanlang. Ulardagi akkauntlar o‘chmaydi: «Asosiy» bo‘limga o‘tadi.</p>
+    <div id="group-delete-list" class="pick-list"></div>
+    <p id="group-delete-error" role="alert"></p>
+    <div class="actions"><button type="button" id="group-delete-cancel" class="ghost">Bekor qilish</button><button id="group-delete-submit" class="primary danger-solid" disabled>O‘chirish</button></div>
   </form>
 </dialog>
 

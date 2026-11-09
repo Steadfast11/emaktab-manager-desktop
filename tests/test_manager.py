@@ -538,3 +538,20 @@ def test_selected_ids_limit_the_cycle(monkeypatch, tmp_path):
     asyncio.run(m.Runner().run(False, None, False, ['only1', 'only3']))
     states = {a['id']: a['status'] for a in m.public_accounts()}
     assert states == {'only0': 'idle', 'only1': 'failed', 'only2': 'idle', 'only3': 'failed'}, states
+
+
+def test_delete_chosen_groups_keeps_accounts_and_protects_default():
+    clear()
+    with m.connect() as c:
+        c.execute("DELETE FROM account_groups WHERE id!='default'")
+        c.execute("INSERT INTO account_groups(id,name) VALUES('g1','4-B'),('g2','9-D'),('g3','5-V')")
+    _add_accounts(2, 'grp')
+    with m.connect() as c:
+        c.execute("UPDATE accounts SET group_id='g2' WHERE id='grp1'")
+    with TestClient(m.app) as c:
+        r = c.post('/api/groups/delete', json={'ids': ['g1', 'g2', 'default', 'ghost']}, headers=HEADERS)
+        assert r.json() == {'ok': True, 'deleted': 2, 'moved': 1}, r.text
+        assert c.post('/api/groups/delete', json={'ids': []}, headers=HEADERS).status_code == 422
+        names = {g['id']: g['name'] for g in c.get('/api/state').json()['groups']}
+        assert set(names) == {'default', 'g3'}, names
+    assert {a['id']: a['group_id'] for a in m.public_accounts()} == {'grp0': 'default', 'grp1': 'default'}

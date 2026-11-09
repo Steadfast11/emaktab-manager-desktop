@@ -724,6 +724,20 @@ async def rename_group(gid: str, group: Group):
     return {'ok': True}
 
 
+@app.post('/api/groups/delete')
+async def delete_groups(body: Ids):
+    """Delete the chosen sections. Their accounts are kept and move to the main section ('default', which itself cannot be deleted)."""
+    editable()
+    with connect() as c:
+        known = {r[0] for r in c.execute('SELECT id FROM account_groups')}
+        gone = [g for g in dict.fromkeys(body.ids) if g in known and g != 'default']
+        moved = 0
+        for gid in gone:
+            moved += c.execute("UPDATE accounts SET group_id='default' WHERE group_id=?", (gid,)).rowcount
+            c.execute('DELETE FROM account_groups WHERE id=?', (gid,))
+    return {'ok': True, 'deleted': len(gone), 'moved': moved}
+
+
 @app.post('/api/accounts')
 async def add(a: Account):
     editable()

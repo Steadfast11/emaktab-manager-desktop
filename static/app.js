@@ -100,7 +100,7 @@ async function refresh(){
     const again=s.accounts.filter(a=>RETRYABLE.includes(a.status)&&!(a.detail||'').startsWith('Login/parol rad etildi')).length;
     $('retry').disabled=s.running||!again;$('retry').textContent='↻ Xatolarni qayta urinish'+(again?' ('+again+')':'');
     $('stop').disabled=!s.running;
-    for(const id of ['add','bulk','add-group'])$(id).disabled=s.running;
+    for(const id of ['add','bulk','add-group','delete-groups'])$(id).disabled=s.running;
     syncButtons();
     const lsig=JSON.stringify(s.logs);
     if(lsig!==logSig){logSig=lsig;const box=$('logs');box.replaceChildren();const names2=Object.fromEntries(s.accounts.map(a=>[a.id,a.login]));
@@ -130,6 +130,25 @@ $('account-form').onsubmit=async e=>{e.preventDefault();try{await api('accounts'
 /* ---------- bo‘limlar ---------- */
 function openGroupEditor(rename){editingGroup=rename?activeGroup:null;$('group-name').value=rename?groupName(activeGroup):'';$('group-title').textContent=rename?'Bo‘lim nomini o‘zgartirish':'Yangi bo‘lim';$('group-error').textContent='';$('group-editor').showModal();}
 $('add-group').onclick=()=>openGroupEditor(false);$('rename-group').onclick=()=>openGroupEditor(true);$('group-cancel').onclick=()=>$('group-editor').close();
+function openGroupDelete(){
+  const list=$('group-delete-list');list.replaceChildren();$('group-delete-error').textContent='';
+  for(const g of groups){
+    const n=lastAccounts.filter(a=>(a.group_id||'default')===g.id).length;
+    const lock=g.id==='default';
+    const lab=el('label',null,lock?'locked':'');const cb=el('input',null,'pick');cb.type='checkbox';cb.value=g.id;cb.disabled=lock;
+    cb.onchange=()=>{$('group-delete-submit').disabled=!list.querySelector('input:checked');};
+    lab.append(cb,el('span',g.name),el('small',lock?n+' ta akkaunt · asosiy, o‘chirilmaydi':n+' ta akkaunt'));list.append(lab);
+  }
+  $('group-delete-submit').disabled=true;$('group-delete-editor').showModal();
+}
+$('delete-groups').onclick=openGroupDelete;$('group-delete-cancel').onclick=()=>$('group-delete-editor').close();
+$('group-delete-form').onsubmit=async e=>{
+  e.preventDefault();
+  const ids=[...document.querySelectorAll('#group-delete-list input:checked')].map(c=>c.value);if(!ids.length)return;
+  const moved=lastAccounts.filter(a=>ids.includes(a.group_id||'default')).length;
+  if(!confirm(ids.length+' ta bo‘lim o‘chirilsinmi?'+(moved?' Ulardagi '+moved+' ta akkaunt «Asosiy» bo‘limga o‘tadi.':'')))return;
+  try{await api('groups/delete','POST',{ids});if(ids.includes(activeGroup))activeGroup=null;groupSig='';$('group-delete-editor').close();say('Bo‘lim(lar) o‘chirildi.');await refresh();}catch(err){$('group-delete-error').textContent=err.message;}
+};
 $('group-form').onsubmit=async e=>{e.preventDefault();try{const r=await api('groups'+(editingGroup?'/'+editingGroup:''),editingGroup?'PUT':'POST',{name:$('group-name').value.trim()});if(!editingGroup)activeGroup=r.id;groupSig='';$('group-editor').close();await refresh();}catch(err){$('group-error').textContent=err.message;}};
 
 /* ---------- ko‘plab qo‘shish ---------- */
