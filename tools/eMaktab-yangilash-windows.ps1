@@ -59,7 +59,7 @@ try {
     Write-Host "Yangi versiya yuklanmoqda (50 MB), biroz kuting..."
     try { (New-Object Net.WebClient).DownloadFile($url, $tmp) }
     catch { throw "Yuklab bo'lmadi. Internetni tekshiring va qayta urinib ko'ring. Hech narsa o'zgarmadi." }
-    $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $tmp).Hash.ToLower()
+    $got = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($tmp)))).Replace('-', '').ToLower()
     if ($got -ne $expected) { Remove-Item -LiteralPath $tmp -Force; throw "Yuklangan fayl buzilgan (SHA256 mos emas). Hech narsa o'zgarmadi." }
 
     # 3) Ilovani yopamiz (akkauntlar yopilganda saqlanadi)

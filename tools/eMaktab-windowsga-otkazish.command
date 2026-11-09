@@ -79,7 +79,7 @@ try {
         $tmp = Join-Path $defaultDir 'eMaktab.exe.download'
         try { (New-Object Net.WebClient).DownloadFile($url, $tmp) }
         catch { throw "Ilovani yuklab bo'lmadi. Internetni tekshiring va qayta urinib ko'ring." }
-        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $tmp).Hash.ToLower()
+        $got = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($tmp)))).Replace('-', '').ToLower()
         if ($got -ne $expected) { Remove-Item -LiteralPath $tmp -Force; throw "Yuklangan fayl buzilgan (SHA256 mos emas). Qayta urinib ko'ring." }
         $exe = Join-Path $defaultDir 'eMaktab.exe'
         Move-Item -LiteralPath $tmp -Destination $exe -Force

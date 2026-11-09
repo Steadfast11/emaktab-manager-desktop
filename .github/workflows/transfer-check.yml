@@ -38,7 +38,7 @@ jobs:
           $app = Join-Path $env:RUNNER_TEMP 'eMaktab-app'
           $env:EMAKTAB_APP_DIR = $app
           $env:EMAKTAB_NO_OPEN = '1'
-          $before = (Get-FileHash (Join-Path $app 'eMaktab.exe')).Hash
+          $before = (Get-FileHash -Algorithm SHA256 (Join-Path $app 'eMaktab.exe')).Hash
           cmd /c "`"$env:RUNNER_TEMP\transfer.cmd`" < NUL"
-          if ((Get-FileHash (Join-Path $app 'eMaktab.exe')).Hash -ne $before) { throw 'exe changed on second run' }
+          if ((Get-FileHash -Algorithm SHA256 (Join-Path $app 'eMaktab.exe')).Hash -ne $before) { throw 'exe changed on second run' }
           Write-Output 'TRANSFER_RERUN_OK'
