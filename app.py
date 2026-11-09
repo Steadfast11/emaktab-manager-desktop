@@ -238,7 +238,8 @@ def browser_channels():
     return ['msedge', 'chrome', 'chromium'] if sys.platform == 'win32' else ['chrome', 'msedge', 'chromium']
 
 
-ACCOUNT_SECONDS = {False: 150, True: 330}  # most time one account may take (hidden / visible browser)
+MANUAL_WAIT_SECONDS = 25  # how long a visible browser waits for CAPTCHA/2FA before the account is skipped
+ACCOUNT_SECONDS = {False: 150, True: 190}  # most time one account may take (hidden / visible browser)
 
 
 class StopCycle(Exception):
@@ -555,9 +556,9 @@ class Runner:
         if not headed:
             update(aid, 'waiting', 'CAPTCHA/2FA yoki qo‘lda kirish kerak. Brauzer oynasi rejimida qayta ishga tushiring')
             return False
-        update(aid, 'waiting', 'Brauzer oynasida CAPTCHA/2FA yoki kirishni bajaring. 120 soniya kutiladi')
+        update(aid, 'waiting', 'Brauzer oynasida CAPTCHA/2FA yoki kirishni bajaring. 25 soniya kutiladi')
         stable, reason = 0, ''
-        for _ in range(120):
+        for _ in range(MANUAL_WAIT_SECONDS):
             check = await page_detection(page, rate)
             if check.outcome == Outcome.RATE_LIMIT:
                 halt_cycle(aid, check)
